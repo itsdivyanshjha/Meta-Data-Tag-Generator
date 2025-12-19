@@ -1,6 +1,9 @@
 import openai
 from typing import List, Dict, Any
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class AITagger:
@@ -41,17 +44,20 @@ class AITagger:
                 messages=[
                     {
                         "role": "system", 
-                        "content": "You are a document tagging expert. Generate relevant, searchable tags for documents. Return ONLY comma-separated tags, nothing else."
+                        "content": "You are a document tagging expert. Generate relevant, searchable tags for documents. Return ONLY comma-separated lowercase tags, nothing else."
                     },
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=200,
+                max_tokens=300,
                 temperature=0.3
             )
             
             # Parse response
             tags_text = response.choices[0].message.content.strip()
+            logger.info(f"Raw AI response: '{tags_text}'")
+            
             tags = self._parse_tags(tags_text, num_tags)
+            logger.info(f"Parsed tags: {tags}")
             
             tokens_used = 0
             if response.usage:
@@ -77,6 +83,7 @@ class AITagger:
                 "tags": []
             }
         except Exception as e:
+            logger.error(f"Error in generate_tags: {str(e)}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e),
@@ -104,51 +111,79 @@ Content Preview:
 
 Requirements:
 - Generate exactly {num_tags} tags
-- Tags should be lowercase
+- All tags must be lowercase
 - Use single words or short 2-3 word phrases
 - Focus on: document type, main topics, key themes, organizations mentioned, relevant dates/years
 - Make tags useful for search and categorization
 - Avoid generic tags like "document", "file", "pdf", "text"
 - No special characters, only alphanumeric and spaces/hyphens
 
-Return ONLY comma-separated tags, nothing else.
-Example format: machine learning, data science, 2024, neural networks, python, tensorflow"""
+Return ONLY comma-separated tags in lowercase, nothing else.
+Example: annual report, social justice, government india, 2019-20, ministry report, empowerment, policy document, public service
+
+Tags:"""
         
         return prompt
     
     def _parse_tags(self, tags_text: str, expected_count: int) -> List[str]:
         """Parse and clean tags from AI response"""
+        logger.info(f"Parsing tags from: '{tags_text}'")
+        
         # Remove any markdown formatting
-        tags_text = tags_text.replace('```', '').replace('*', '').replace('`', '').strip()
+        tags_text = tags_text.replace('```', '').replace('*', '').replace('`', '').replace('"', '').strip()
         
         # Remove common prefixes that AI might add
-        prefixes_to_remove = ['tags:', 'here are', 'the tags are:', 'generated tags:']
+        prefixes_to_remove = ['tags:', 'here are', 'the tags are:', 'generated tags:', 'output:']
         tags_text_lower = tags_text.lower()
         for prefix in prefixes_to_remove:
             if tags_text_lower.startswith(prefix):
                 tags_text = tags_text[len(prefix):].strip()
+                logger.info(f"Removed prefix '{prefix}', remaining: '{tags_text}'")
         
-        # Split by comma or newline
+        # Split by comma, semicolon, or newline
         if ',' in tags_text:
             tags = [tag.strip() for tag in tags_text.split(',')]
+        elif ';' in tags_text:
+            tags = [tag.strip() for tag in tags_text.split(';')]
         else:
             tags = [tag.strip() for tag in tags_text.split('\n')]
+        
+        logger.info(f"Split into {len(tags)} tags: {tags}")
         
         # Clean and validate tags
         valid_tags = []
         for tag in tags:
+            if not tag:
+                continue
+                
             # Clean the tag
+            original_tag = tag
             tag = tag.lower().strip()
-            tag = re.sub(r'^[\d\.\-\)\]\s]+', '', tag)  # Remove leading numbers/bullets
-            tag = re.sub(r'[^\w\s\-]', '', tag)  # Keep only alphanumeric, spaces, hyphens
-            tag = re.sub(r'\s+', ' ', tag).strip()  # Normalize whitespace
             
-            # Validate tag length and content
-            if 2 <= len(tag) <= 50 and tag not in valid_tags:
+            # Remove leading numbers/bullets
+            tag = re.sub(r'^[\d\.\-\)\]\s]+', '', tag)
+            
+            # Remove special characters but keep alphanumeric, spaces, and hyphens
+            tag = re.sub(r'[^\w\s\-]', '', tag)
+            
+            # Normalize whitespace
+            tag = re.sub(r'\s+', ' ', tag).strip()
+            
+            logger.info(f"Cleaned tag: '{original_tag}' -> '{tag}' (length: {len(tag)})")
+            
+            # Validate tag length and content - BE MORE LENIENT
+            if len(tag) >= 2 and len(tag) <= 100 and tag not in valid_tags:
                 valid_tags.append(tag)
+                logger.info(f"Tag accepted: '{tag}'")
+            else:
+                logger.info(f"Tag rejected: '{tag}' (length: {len(tag)}, duplicate: {tag in valid_tags})")
+        
+        logger.info(f"Final valid tags ({len(valid_tags)}): {valid_tags}")
         
         # Limit to expected count
-        return valid_tags[:expected_count]
+        result = valid_tags[:expected_count]
+        logger.info(f"Returning {len(result)} tags: {result}")
+        return result
     
     def test_connection(self) -> Dict[str, Any]:
         """Test API connection"""
@@ -161,4 +196,3 @@ Example format: machine learning, data science, 2024, neural networks, python, t
             return {"success": True, "message": "Connection successful"}
         except Exception as e:
             return {"success": False, "error": str(e)}
-

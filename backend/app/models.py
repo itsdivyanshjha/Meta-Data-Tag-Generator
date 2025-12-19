@@ -22,6 +22,7 @@ class SinglePDFResponse(BaseModel):
     tags: List[str]
     extracted_text_preview: str
     processing_time: float
+    raw_ai_response: Optional[str] = None  # Debug field
     error: Optional[str] = None
 
 
@@ -65,4 +66,3 @@ class HealthCheckResponse(BaseModel):
     status: str
     version: str
     message: str
-

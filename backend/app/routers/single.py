@@ -4,6 +4,11 @@ from app.services.pdf_extractor import PDFExtractor
 from app.services.ai_tagger import AITagger
 import time
 import json
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -27,6 +32,9 @@ async def process_single_pdf(
         config_dict = json.loads(config)
         tagging_config = TaggingConfig(**config_dict)
         
+        logger.info(f"Processing PDF: {pdf_file.filename}")
+        logger.info(f"Using model: {tagging_config.model_name}")
+        
         # Validate file type
         if not pdf_file.filename or not pdf_file.filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail="Invalid file type. Please upload a PDF file.")
@@ -47,6 +55,9 @@ async def process_single_pdf(
                 detail=f"PDF extraction failed: {extraction_result.get('error', 'Unknown error')}"
             )
         
+        logger.info(f"Extracted {len(extraction_result['extracted_text'])} characters")
+        logger.info(f"Document title: {extraction_result.get('title', 'Unknown')}")
+        
         # Check if we have enough text
         if len(extraction_result["extracted_text"].strip()) < 50:
             raise HTTPException(
@@ -63,6 +74,10 @@ async def process_single_pdf(
             num_tags=tagging_config.num_tags
         )
         
+        logger.info(f"Tagging result success: {tagging_result['success']}")
+        logger.info(f"Tags generated: {tagging_result.get('tags', [])}")
+        logger.info(f"Raw response: {tagging_result.get('raw_response', 'N/A')}")
+        
         if not tagging_result["success"]:
             raise HTTPException(
                 status_code=500, 
@@ -71,18 +86,23 @@ async def process_single_pdf(
         
         processing_time = time.time() - start_time
         
-        return SinglePDFResponse(
+        response = SinglePDFResponse(
             success=True,
             document_title=extraction_result.get("title", pdf_file.filename or "Untitled"),
             tags=tagging_result["tags"],
             extracted_text_preview=extraction_result["extracted_text"][:500],
-            processing_time=round(processing_time, 2)
+            processing_time=round(processing_time, 2),
+            raw_ai_response=tagging_result.get("raw_response", "N/A")  # Include raw response for debugging
         )
+        
+        logger.info(f"Response tags count: {len(response.tags)}")
+        
+        return response
         
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid config JSON format")
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Error processing PDF: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-

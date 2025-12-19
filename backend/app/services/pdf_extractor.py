@@ -37,12 +37,8 @@ class PDFExtractor:
             # Clean text
             extracted_text = PDFExtractor._clean_text(extracted_text)
             
-            # Try to get title from metadata
-            title = "Untitled Document"
-            if pdf_reader.metadata:
-                metadata_title = pdf_reader.metadata.get('/Title')
-                if metadata_title and str(metadata_title).strip():
-                    title = str(metadata_title).strip()
+            # Try to get title from metadata or extract from content
+            title = PDFExtractor._extract_title(pdf_reader, extracted_text)
             
             return {
                 "success": True,
@@ -61,6 +57,31 @@ class PDFExtractor:
                 "pages_extracted": 0,
                 "title": "Untitled Document"
             }
+    
+    @staticmethod
+    def _extract_title(pdf_reader, extracted_text: str) -> str:
+        """Extract title from metadata or content"""
+        # Try metadata first
+        if pdf_reader.metadata:
+            metadata_title = pdf_reader.metadata.get('/Title')
+            if metadata_title and str(metadata_title).strip():
+                title = str(metadata_title).strip()
+                if title and title.lower() not in ['untitled', 'document', 'untitled document']:
+                    return title
+        
+        # Try to extract from first few lines of content
+        if extracted_text:
+            lines = extracted_text.split('\n')
+            for line in lines[:5]:  # Check first 5 lines
+                line = line.strip()
+                # Look for lines that might be titles (length between 10-100 chars, has some substance)
+                if 10 <= len(line) <= 100 and not line.isdigit():
+                    # Remove common prefixes
+                    line = re.sub(r'^(title|subject|report|document):\s*', '', line, flags=re.IGNORECASE)
+                    if len(line) >= 10:
+                        return line
+        
+        return "Untitled Document"
     
     @staticmethod
     def _clean_text(text: str) -> str:
@@ -112,4 +133,3 @@ class PDFExtractor:
                 "success": False,
                 "error": str(e)
             }
-
