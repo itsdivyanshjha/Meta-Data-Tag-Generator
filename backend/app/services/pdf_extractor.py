@@ -8,7 +8,7 @@ import logging
 try:
     import pytesseract
     from pdf2image import convert_from_bytes
-    from PIL import Image
+    from PIL import Image, ImageEnhance
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
@@ -24,17 +24,17 @@ class PDFExtractor:
     - Primary: PyPDF2 for text-based PDFs (fast)
     - Fallback: Tesseract OCR for scanned PDFs (slower but handles images)
     - Auto-detection: Determines if PDF is scanned based on text extraction results
-    - Multi-language: Supports English and Hindi
+    - Multi-language: Supports English and Hindi (Devanagari script)
     """
     
     # Threshold: if we extract less than this many chars per page, consider it scanned
-    SCANNED_THRESHOLD_CHARS_PER_PAGE = 50
+    SCANNED_THRESHOLD_CHARS_PER_PAGE = 100  # Increased from 50 for better detection
     
     @staticmethod
     def extract_text(
         pdf_bytes: bytes, 
         num_pages: int = 3,
-        ocr_languages: str = "eng+hin"  # English + Hindi
+        ocr_languages: str = "hin+eng"  # Hindi first, then English for better Hindi detection
     ) -> Dict[str, Any]:
         """
         Extract text from PDF with automatic OCR fallback
@@ -42,7 +42,7 @@ class PDFExtractor:
         Args:
             pdf_bytes: PDF file as bytes
             num_pages: Number of pages to extract (default 3)
-            ocr_languages: Tesseract language codes (default: eng+hin)
+            ocr_languages: Tesseract language codes (default: hin+eng for Hindi priority)
             
         Returns:
             dict with extracted_text, page_count, title, and OCR metadata
@@ -125,16 +125,35 @@ class PDFExtractor:
             page_count = len(pdf_reader.pages)
             pages_to_extract = min(num_pages, page_count)
             
-            # Extract text from specified pages
+            # Extract text from specified pages with proper encoding
             extracted_text = ""
             for i in range(pages_to_extract):
                 page = pdf_reader.pages[i]
                 page_text = page.extract_text()
                 if page_text:
+                    # Ensure proper UTF-8 encoding
+                    try:
+                        # Try to encode/decode to fix encoding issues
+                        page_text = page_text.encode('utf-8', errors='ignore').decode('utf-8')
+                    except:
+                        # If fails, use as is
+                        pass
                     extracted_text += page_text + "\n"
             
-            # Clean text
-            extracted_text = PDFExtractor._clean_text(extracted_text)
+            # Check if text looks corrupted (has lots of non-standard ASCII but not proper Unicode)
+            # This indicates encoding issues
+            is_likely_corrupted = PDFExtractor._is_text_corrupted(extracted_text)
+            
+            if is_likely_corrupted:
+                logger.warning("Detected corrupted/wrong encoding in PyPDF2 extraction")
+                # Force OCR for better results
+                return {
+                    "success": True,
+                    "extracted_text": "",  # Empty to trigger OCR
+                    "page_count": page_count,
+                    "pages_extracted": 0,  # Zero to trigger OCR fallback
+                    "title": "Untitled Document"
+                }
             
             # Try to get title from metadata or extract from content
             title = PDFExtractor._extract_title(pdf_reader, extracted_text)
@@ -162,18 +181,19 @@ class PDFExtractor:
     def _extract_with_ocr(
         pdf_bytes: bytes, 
         num_pages: int, 
-        languages: str = "eng+hin"
+        languages: str = "hin+eng"
     ) -> Dict[str, Any]:
         """Extract text using Tesseract OCR (slower, for scanned PDFs)"""
         try:
             logger.info(f"Starting OCR extraction with languages: {languages}")
             
-            # Convert PDF to images
+            # Convert PDF to images with optimal DPI
+            # Note: Too high DPI on low-quality scans makes it worse
             images = convert_from_bytes(
                 pdf_bytes,
                 first_page=1,
                 last_page=num_pages,
-                dpi=200  # Balance between quality and performance
+                dpi=300  # Optimal for most government PDFs (not too high, not too low)
             )
             
             logger.info(f"Converted PDF to {len(images)} images")
@@ -185,29 +205,51 @@ class PDFExtractor:
             for idx, image in enumerate(images):
                 logger.info(f"Processing page {idx + 1}/{len(images)} with OCR...")
                 
-                # Perform OCR
-                ocr_data = pytesseract.image_to_data(
-                    image, 
-                    lang=languages,
-                    output_type=pytesseract.Output.DICT
-                )
+                # Preprocess image for better OCR
+                try:
+                    # Convert to grayscale and enhance contrast
+                    image = image.convert('L')  # Grayscale
+                    
+                    # Apply contrast enhancement for low-quality scans
+                    enhancer = ImageEnhance.Contrast(image)
+                    image = enhancer.enhance(2.0)  # Increase contrast
+                except Exception as prep_error:
+                    logger.warning(f"Image preprocessing failed: {prep_error}, using original")
                 
-                # Extract text and confidence
-                page_text = " ".join([
-                    word for word, conf in zip(ocr_data['text'], ocr_data['conf'])
-                    if conf > 0  # Filter out low-confidence results
-                ])
-                
-                # Calculate average confidence for this page
-                valid_confidences = [c for c in ocr_data['conf'] if c > 0]
-                if valid_confidences:
-                    avg_confidence = sum(valid_confidences) / len(valid_confidences)
-                    confidence_scores.append(avg_confidence)
-                
-                extracted_text += page_text + "\n"
+                # Perform OCR with proper Hindi/Devanagari support
+                try:
+                    # Try multiple PSM modes for better results
+                    # PSM 3: Automatic page segmentation (usually best for mixed content)
+                    page_text = pytesseract.image_to_string(
+                        image,
+                        lang=languages,
+                        config='--psm 3 --oem 1'  # PSM 3: auto, OEM 1: neural nets LSTM
+                    )
+                    
+                    # Get confidence scores
+                    ocr_data = pytesseract.image_to_data(
+                        image, 
+                        lang=languages,
+                        output_type=pytesseract.Output.DICT
+                    )
+                    
+                    # Calculate average confidence for this page
+                    valid_confidences = [c for c in ocr_data['conf'] if c > 0]
+                    if valid_confidences:
+                        avg_confidence = sum(valid_confidences) / len(valid_confidences)
+                        confidence_scores.append(avg_confidence)
+                    
+                    extracted_text += page_text + "\n"
+                    
+                    # Log first 200 chars to check encoding
+                    logger.info(f"OCR text sample: {page_text[:200]}")
+                    
+                except Exception as page_error:
+                    logger.error(f"Error OCR'ing page {idx + 1}: {str(page_error)}")
+                    continue
             
-            # Clean text
-            extracted_text = PDFExtractor._clean_text(extracted_text)
+            # Light cleaning - preserve Hindi characters
+            extracted_text = PDFExtractor._clean_text_unicode_safe(extracted_text)
             
             # Calculate overall OCR confidence
             overall_confidence = (
@@ -219,6 +261,7 @@ class PDFExtractor:
             title = PDFExtractor._extract_title_from_text(extracted_text)
             
             logger.info(f"OCR extraction complete. Confidence: {overall_confidence:.1f}%")
+            logger.info(f"Extracted text length: {len(extracted_text)} chars")
             
             return {
                 "success": True,
@@ -263,36 +306,90 @@ class PDFExtractor:
     def _extract_title_from_text(text: str) -> str:
         """Extract title from first few lines of text"""
         if text:
-            lines = text.split('\n')
-            for line in lines[:5]:  # Check first 5 lines
-                line = line.strip()
+            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            for line in lines[:5]:  # Check first 5 non-empty lines
                 # Look for lines that might be titles (length between 10-100 chars)
-                if 10 <= len(line) <= 100 and not line.isdigit():
-                    # Remove common prefixes
-                    line = re.sub(r'^(title|subject|report|document):\s*', '', line, flags=re.IGNORECASE)
-                    if len(line) >= 10:
-                        return line
+                if 10 <= len(line) <= 100:
+                    return line
         
         return "Untitled Document"
     
     @staticmethod
-    def _clean_text(text: str) -> str:
-        """Clean extracted text"""
-        # Remove excessive whitespace
-        text = re.sub(r'\s+', ' ', text)
+    def _clean_text_unicode_safe(text: str) -> str:
+        """
+        Clean extracted text while preserving Unicode characters (Hindi/Devanagari)
+        """
+        # Normalize whitespace
+        text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces/tabs to single space
+        text = re.sub(r'\n\n+', '\n', text)  # Multiple newlines to single
         
-        # Remove special characters (keep basic punctuation)
-        text = re.sub(r'[^\w\s.,;:!?()\-\'\"@#$%&*/+=<>]', '', text)
+        # Remove only truly problematic characters, keep Devanagari (U+0900-U+097F)
+        # Keep: Latin, Devanagari, numbers, basic punctuation
+        # Remove: Control characters, weird symbols
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
         
-        # Remove multiple spaces
-        text = re.sub(r' +', ' ', text)
-        
-        # Limit length (keep first 2000 words for cost efficiency)
+        # Limit length (keep first 2500 words for better context)
         words = text.split()
-        if len(words) > 2000:
-            text = ' '.join(words[:2000])
+        if len(words) > 2500:
+            text = ' '.join(words[:2500])
         
         return text.strip()
+    
+    @staticmethod
+    def _is_text_corrupted(text: str) -> bool:
+        """
+        Detect if extracted text is corrupted/wrong encoding
+        
+        Specifically detects:
+        1. Krutidev/legacy Hindi fonts (common in government docs)
+        2. Wrong character encoding
+        3. Mixed garbage characters
+        """
+        if not text or len(text) < 50:
+            return False
+        
+        # Sample first 1000 chars for better detection
+        sample = text[:1000]
+        
+        # KRUTIDEV DETECTION - This is the main issue!
+        # Krutidev fonts use specific ASCII patterns for Hindi
+        # Common Krutidev characters: k, [k, jk, ns, esa, ds, etc.
+        krutidev_patterns = [
+            'lkekftd',  # सामाजिक in Krutidev
+            'iQjojh',   # फरवरी in Krutidev  
+            'lans\'k',  # संदेश in Krutidev
+            'jfonkl',   # रविदास in Krutidev
+            'U;k;',     # न्याय in Krutidev
+            'lar',      # संत in Krutidev
+            'xka/kh',   # गांधी in Krutidev
+            'Hkkjr',    # भारत in Krutidev
+            'ea=ky;',   # मंत्रालय in Krutidev
+        ]
+        
+        # If we find ANY Krutidev pattern, it's corrupted
+        for pattern in krutidev_patterns:
+            if pattern in sample:
+                logger.warning(f"Detected Krutidev encoding pattern: '{pattern}'")
+                return True
+        
+        # Additional check: lots of special chars like @ {} [] 
+        special_char_count = sum(1 for c in sample if c in '@#$%^&*~`|\\{}[]')
+        if len(sample) > 0 and (special_char_count / len(sample)) > 0.05:
+            logger.info(f"Detected high special character ratio: {special_char_count}/{len(sample)}")
+            return True
+        
+        # Check for patterns of lowercase consonants with diacritics (Krutidev style)
+        # Krutidev uses patterns like: dk, dks, dh, nh, etc.
+        krutidev_style_patterns = 0
+        for i in range(len(sample) - 1):
+            if sample[i:i+2] in ['dk', 'dh', 'ds', 'nh', 'fk', 'jk', 'uk', 'vk', 'lk']:
+                krutidev_style_patterns += 1
+        
+        if len(sample) > 0 and (krutidev_style_patterns / len(sample)) > 0.02:
+            logger.warning(f"Detected Krutidev-style patterns: {krutidev_style_patterns}")
+            return True
+        
+        return False
     
     @staticmethod
     def get_pdf_info(pdf_bytes: bytes) -> Dict[str, Any]:

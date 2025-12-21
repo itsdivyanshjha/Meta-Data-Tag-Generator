@@ -18,7 +18,7 @@ async def process_single_pdf(
     pdf_file: UploadFile = File(...),
     config: str = Form(...)
 ):
-    """
+    """![1766297144713](image/single/1766297144713.png)![1766297149855](image/single/1766297149855.png)![1766297161780](image/single/1766297161780.png)
     Process single PDF and generate tags with automatic OCR support
     
     Args:

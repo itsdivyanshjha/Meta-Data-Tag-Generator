@@ -9,9 +9,30 @@ logger = logging.getLogger(__name__)
 class AITagger:
     """Generate tags using OpenRouter API"""
     
+    # Models that are known to NOT work for tagging
+    UNSUPPORTED_MODELS = [
+        'deepseek-r1',  # Reasoning models
+        'deepseek-reasoner',
+        'o1-',  # OpenAI reasoning models
+        'qwen-vl',  # Vision-language models
+        'qwen-2.5-vl',
+    ]
+    
     def __init__(self, api_key: str, model_name: str = "openai/gpt-4o-mini"):
         self.api_key = api_key
         self.model_name = model_name
+        
+        # Warn about unsupported models
+        model_lower = model_name.lower()
+        for unsupported in self.UNSUPPORTED_MODELS:
+            if unsupported in model_lower:
+                logger.warning(
+                    f"⚠️ WARNING: Model '{model_name}' is likely incompatible for tagging tasks. "
+                    f"Reasoning/vision models often return empty responses. "
+                    f"Recommended: google/gemini-flash-1.5, openai/gpt-4o-mini, anthropic/claude-3-haiku"
+                )
+                break
+        
         self.client = openai.OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key
@@ -44,12 +65,12 @@ class AITagger:
                 messages=[
                     {
                         "role": "system", 
-                        "content": "You are a document tagging expert. Generate relevant, searchable tags for documents. Return ONLY comma-separated lowercase tags, nothing else."
+                        "content": "You are a multilingual document tagging expert for Indian government documents. You understand both English and Hindi (Devanagari script). ALWAYS generate tags in ENGLISH ONLY, even if the document is in Hindi or other languages. Translate concepts to English for universal searchability. Return ONLY comma-separated lowercase English tags, nothing else."
                     },
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=300,
-                temperature=0.3
+                max_tokens=400,
+                temperature=0.2
             )
             
             # Parse response
@@ -76,10 +97,17 @@ class AITagger:
                 "error": "Invalid API key. Please check your OpenRouter API key.",
                 "tags": []
             }
-        except openai.RateLimitError:
+        except openai.RateLimitError as e:
+            error_msg = str(e)
+            if "429" in error_msg:
+                return {
+                    "success": False,
+                    "error": "Rate limit exceeded. Free models have request limits. Try: 1) Wait a minute and retry, 2) Use a different model, or 3) Add credits to your OpenRouter account.",
+                    "tags": []
+                }
             return {
                 "success": False,
-                "error": "Rate limit exceeded. Please try again later.",
+                "error": f"Rate limit exceeded: {error_msg}",
                 "tags": []
             }
         except Exception as e:
@@ -101,7 +129,7 @@ class AITagger:
         # Truncate content if too long
         content_preview = content[:1500] if len(content) > 1500 else content
         
-        prompt = f"""Generate exactly {num_tags} relevant meta-data tags for this document.
+        prompt = f"""You are analyzing an Indian government/organizational document. Generate exactly {num_tags} highly SPECIFIC and DESCRIPTIVE meta-data tags in English.
 
 Document Title: {title}
 Description: {description if description else 'N/A'}
@@ -109,24 +137,54 @@ Description: {description if description else 'N/A'}
 Content Preview:
 {content_preview}
 
-Requirements:
-- Generate exactly {num_tags} tags
-- All tags must be lowercase
-- Use single words or short 2-3 word phrases
-- Focus on: document type, main topics, key themes, organizations mentioned, relevant dates/years
-- Make tags useful for search and categorization
-- Avoid generic tags like "document", "file", "pdf", "text"
-- No special characters, only alphanumeric and spaces/hyphens
+TAGGING STRATEGY - Be SPECIFIC, not generic:
 
-Return ONLY comma-separated tags in lowercase, nothing else.
-Example: annual report, social justice, government india, 2019-20, ministry report, empowerment, policy document, public service
+1. ORGANIZATION/MINISTRY (if mentioned):
+   - Identify the specific ministry, department, or organization
+   - Examples: "ministry of social justice", "dr ambedkar foundation", "ncsc"
+
+2. DOCUMENT TYPE (be specific):
+   - Don't just say "annual report" - add context
+   - Examples: "annual report 2019-20", "quarterly newsletter", "policy document"
+
+3. MAIN TOPICS/THEMES (specific subjects):
+   - Identify actual topics discussed
+   - Examples: "backward classes welfare", "legal aid services", "digital literacy programs"
+   - NOT generic terms like "government policy"
+
+4. KEY PEOPLE/FIGURES (if mentioned):
+   - Examples: "dr br ambedkar", "sant ravidas", specific ministers
+
+5. LOCATIONS/REGIONS (if relevant):
+   - Specific states, regions, or areas mentioned
+
+6. TIME PERIOD (specific dates/years):
+   - Examples: "2019-20", "february 2016", "31st january"
+
+7. PROGRAMS/SCHEMES (specific names):
+   - Actual program names mentioned
+
+8. TARGET GROUPS (if specified):
+   - Examples: "scheduled castes", "obc communities", "divyang persons"
+
+AVOID THESE GENERIC TAGS:
+❌ "government policy", "organization details", "contact information", "document type", "legal system", "date 2016"
+
+USE THESE SPECIFIC TAGS:
+✅ "social justice ministry", "ravidas jayanti 2016", "sc welfare schemes", "legal aid for marginalized", "february 2016 newsletter"
+
+Output Format:
+- ONLY comma-separated tags
+- ALL tags in lowercase English
+- {num_tags} tags exactly
+- NO explanations, NO numbering
 
 Tags:"""
         
         return prompt
     
     def _parse_tags(self, tags_text: str, expected_count: int) -> List[str]:
-        """Parse and clean tags from AI response"""
+        """Parse and clean tags from AI response (English only output)"""
         logger.info(f"Parsing tags from: '{tags_text}'")
         
         # Remove any markdown formatting
@@ -150,7 +208,7 @@ Tags:"""
         
         logger.info(f"Split into {len(tags)} tags: {tags}")
         
-        # Clean and validate tags
+        # Clean and validate tags (English only)
         valid_tags = []
         for tag in tags:
             if not tag:
@@ -163,7 +221,7 @@ Tags:"""
             # Remove leading numbers/bullets
             tag = re.sub(r'^[\d\.\-\)\]\s]+', '', tag)
             
-            # Remove special characters but keep alphanumeric, spaces, and hyphens
+            # Keep only English alphanumeric, spaces, and hyphens
             tag = re.sub(r'[^\w\s\-]', '', tag)
             
             # Normalize whitespace
@@ -171,12 +229,15 @@ Tags:"""
             
             logger.info(f"Cleaned tag: '{original_tag}' -> '{tag}' (length: {len(tag)})")
             
-            # Validate tag length and content - BE MORE LENIENT
-            if len(tag) >= 2 and len(tag) <= 100 and tag not in valid_tags:
-                valid_tags.append(tag)
-                logger.info(f"Tag accepted: '{tag}'")
+            # Validate: must be ASCII/English only
+            if tag and all(ord(c) < 128 for c in tag):
+                if len(tag) >= 2 and len(tag) <= 100 and tag not in valid_tags:
+                    valid_tags.append(tag)
+                    logger.info(f"Tag accepted: '{tag}'")
+                else:
+                    logger.info(f"Tag rejected: '{tag}' (length: {len(tag)}, duplicate: {tag in valid_tags})")
             else:
-                logger.info(f"Tag rejected: '{tag}' (length: {len(tag)}, duplicate: {tag in valid_tags})")
+                logger.info(f"Tag rejected (non-ASCII): '{tag}'")
         
         logger.info(f"Final valid tags ({len(valid_tags)}): {valid_tags}")
         
