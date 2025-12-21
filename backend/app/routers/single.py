@@ -19,7 +19,7 @@ async def process_single_pdf(
     config: str = Form(...)
 ):
     """
-    Process single PDF and generate tags
+    Process single PDF and generate tags with automatic OCR support
     
     Args:
         pdf_file: Uploaded PDF file
@@ -45,7 +45,7 @@ async def process_single_pdf(
         if not pdf_bytes:
             raise HTTPException(status_code=400, detail="Empty PDF file")
         
-        # Extract text
+        # Extract text (with automatic OCR fallback)
         extractor = PDFExtractor()
         extraction_result = extractor.extract_text(pdf_bytes, tagging_config.num_pages)
         
@@ -57,12 +57,16 @@ async def process_single_pdf(
         
         logger.info(f"Extracted {len(extraction_result['extracted_text'])} characters")
         logger.info(f"Document title: {extraction_result.get('title', 'Unknown')}")
+        logger.info(f"Extraction method: {extraction_result.get('extraction_method', 'unknown')}")
+        
+        if extraction_result.get('is_scanned'):
+            logger.info(f"Scanned PDF detected. OCR confidence: {extraction_result.get('ocr_confidence', 'N/A')}%")
         
         # Check if we have enough text
         if len(extraction_result["extracted_text"].strip()) < 50:
             raise HTTPException(
                 status_code=400, 
-                detail="Could not extract sufficient text from PDF. The document might be scanned or image-based."
+                detail="Could not extract sufficient text from PDF. The document might be scanned or image-based without OCR support."
             )
         
         # Generate tags
@@ -92,7 +96,12 @@ async def process_single_pdf(
             tags=tagging_result["tags"],
             extracted_text_preview=extraction_result["extracted_text"][:500],
             processing_time=round(processing_time, 2),
-            raw_ai_response=tagging_result.get("raw_response", "N/A")  # Include raw response for debugging
+            # OCR metadata
+            is_scanned=extraction_result.get("is_scanned"),
+            extraction_method=extraction_result.get("extraction_method"),
+            ocr_confidence=extraction_result.get("ocr_confidence"),
+            # Debug field
+            raw_ai_response=tagging_result.get("raw_response", "N/A")
         )
         
         logger.info(f"Response tags count: {len(response.tags)}")

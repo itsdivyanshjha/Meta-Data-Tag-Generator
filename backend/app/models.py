@@ -22,7 +22,12 @@ class SinglePDFResponse(BaseModel):
     tags: List[str]
     extracted_text_preview: str
     processing_time: float
-    raw_ai_response: Optional[str] = None  # Debug field
+    # OCR metadata
+    is_scanned: Optional[bool] = None
+    extraction_method: Optional[str] = None
+    ocr_confidence: Optional[float] = None
+    # Debug field
+    raw_ai_response: Optional[str] = None
     error: Optional[str] = None
 
 

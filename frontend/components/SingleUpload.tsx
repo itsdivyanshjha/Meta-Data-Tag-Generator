@@ -218,8 +218,30 @@ export default function SingleUpload({ config }: SingleUploadProps) {
 
           {/* Document Title */}
           <div>
-            <h3 className="text-sm font-medium text-gray-500 mb-2">Document Title</h3>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-medium text-gray-500">Document Title</h3>
+              {/* OCR Status Badge */}
+              {result.is_scanned !== undefined && (
+                <span className={`text-xs px-2 py-1 rounded ${
+                  result.is_scanned 
+                    ? 'bg-purple-100 text-purple-700 border border-purple-300' 
+                    : 'bg-blue-100 text-blue-700 border border-blue-300'
+                }`}>
+                  {result.is_scanned ? (
+                    <>📷 Scanned PDF{result.ocr_confidence ? ` (${result.ocr_confidence}% confidence)` : ''}</>
+                  ) : (
+                    <>📄 Text PDF</>
+                  )}
+                </span>
+              )}
+            </div>
             <p className="text-lg font-semibold text-gray-900">{result.document_title}</p>
+            {/* Extraction Method Info */}
+            {result.extraction_method && (
+              <p className="text-xs text-gray-500 mt-1">
+                Extracted using: {result.extraction_method === 'pypdf2' ? 'PyPDF2' : result.extraction_method === 'tesseract_ocr' ? 'Tesseract OCR (Hindi + English)' : result.extraction_method}
+              </p>
+            )}
           </div>
 
           {/* RAW AI RESPONSE - DEBUG */}
