@@ -14,6 +14,7 @@ export default function Home() {
     num_pages: 3,
     num_tags: 8,
   })
+  const [exclusionFile, setExclusionFile] = useState<File | null>(null)
 
   return (
     <div className="space-y-6">
@@ -44,13 +45,17 @@ export default function Home() {
       {/* Main Content */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-1">
-          <ConfigPanel config={config} setConfig={setConfig} />
+          <ConfigPanel 
+            config={config} 
+            setConfig={setConfig}
+            onExclusionFileChange={setExclusionFile}
+          />
         </div>
         <div className="lg:col-span-2">
           {mode === 'single' ? (
-            <SingleUpload config={config} />
+            <SingleUpload config={config} exclusionFile={exclusionFile} />
           ) : (
-            <BatchUpload config={config} />
+            <BatchUpload config={config} exclusionFile={exclusionFile} />
           )}
         </div>
       </div>

@@ -2,9 +2,14 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from app.models import BatchProcessResponse, TaggingConfig
 from app.services.csv_processor import CSVProcessor
+from app.services.exclusion_parser import ExclusionListParser
+from typing import Optional
 import time
 import json
 import base64
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -12,14 +17,16 @@ router = APIRouter()
 @router.post("/process", response_model=BatchProcessResponse)
 async def process_batch_csv(
     csv_file: UploadFile = File(...),
-    config: str = Form(...)
+    config: str = Form(...),
+    exclusion_file: Optional[UploadFile] = File(None)
 ):
     """
-    Process batch CSV with multiple documents
+    Process batch CSV with multiple documents and optional exclusion list
     
     Args:
         csv_file: Uploaded CSV file
         config: JSON string of TaggingConfig
+        exclusion_file: Optional file containing words/phrases to exclude from tags (.txt or .pdf)
     """
     start_time = time.time()
     
@@ -27,6 +34,23 @@ async def process_batch_csv(
         # Parse config
         config_dict = json.loads(config)
         tagging_config = TaggingConfig(**config_dict)
+        
+        # Parse exclusion file if provided
+        if exclusion_file and exclusion_file.filename:
+            logger.info(f"Processing exclusion file for batch: {exclusion_file.filename}")
+            exclusion_bytes = await exclusion_file.read()
+            
+            try:
+                parser = ExclusionListParser()
+                exclusion_words = parser.parse_from_file(exclusion_bytes, exclusion_file.filename)
+                tagging_config.exclusion_words = list(exclusion_words)
+                logger.info(f"Loaded {len(exclusion_words)} exclusion words for batch processing")
+            except Exception as e:
+                logger.error(f"Failed to parse exclusion file: {str(e)}")
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Failed to parse exclusion file: {str(e)}"
+                )
         
         # Validate file type
         if not csv_file.filename or not csv_file.filename.lower().endswith('.csv'):

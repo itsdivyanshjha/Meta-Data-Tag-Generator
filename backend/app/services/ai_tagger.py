@@ -1,5 +1,5 @@
 import openai
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Set
 import re
 import logging
 
@@ -18,9 +18,10 @@ class AITagger:
         'qwen-2.5-vl',
     ]
     
-    def __init__(self, api_key: str, model_name: str = "openai/gpt-4o-mini"):
+    def __init__(self, api_key: str, model_name: str = "openai/gpt-4o-mini", exclusion_words: Optional[List[str]] = None):
         self.api_key = api_key
         self.model_name = model_name
+        self.exclusion_words: Set[str] = set(word.lower().strip() for word in (exclusion_words or []))
         
         # Warn about unsupported models
         model_lower = model_name.lower()
@@ -46,19 +47,26 @@ class AITagger:
         num_tags: int = 8
     ) -> Dict[str, Any]:
         """
-        Generate tags for document
+        Generate tags for document with exclusion filtering
         
         Args:
             title: Document title
             description: Document description
             content: Extracted text content
-            num_tags: Number of tags to generate
+            num_tags: Number of tags to generate (exact number will be returned after filtering)
             
         Returns:
             dict with tags list and metadata
         """
         try:
-            prompt = self._build_prompt(title, description, content, num_tags)
+            # Calculate buffer: request more tags than needed to account for exclusions
+            # We request 2x the number to ensure we have enough after filtering
+            buffer_multiplier = 2.5 if self.exclusion_words else 1.0
+            requested_tags = int(num_tags * buffer_multiplier)
+            
+            logger.info(f"Requesting {requested_tags} tags (target: {num_tags}, exclusion list size: {len(self.exclusion_words)})")
+            
+            prompt = self._build_prompt(title, description, content, requested_tags)
             
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -77,8 +85,19 @@ class AITagger:
             tags_text = response.choices[0].message.content.strip()
             logger.info(f"Raw AI response: '{tags_text}'")
             
-            tags = self._parse_tags(tags_text, num_tags)
-            logger.info(f"Parsed tags: {tags}")
+            # Parse with buffer amount
+            tags = self._parse_tags(tags_text, requested_tags)
+            logger.info(f"Parsed {len(tags)} tags before exclusion filtering: {tags}")
+            
+            # Apply exclusion filter if needed
+            if self.exclusion_words:
+                original_count = len(tags)
+                tags = self._filter_excluded_tags(tags)
+                logger.info(f"After exclusion filtering: {len(tags)} tags (removed {original_count - len(tags)})")
+            
+            # Trim to exact requested number
+            tags = tags[:num_tags]
+            logger.info(f"Final tags (trimmed to {num_tags}): {tags}")
             
             tokens_used = 0
             if response.usage:
@@ -125,11 +144,25 @@ class AITagger:
         content: str, 
         num_tags: int
     ) -> str:
-        """Build prompt for AI"""
+        """Build prompt for AI with exclusion guidance"""
         # Truncate content if too long
         content_preview = content[:1500] if len(content) > 1500 else content
         
+        # Add exclusion guidance if we have an exclusion list
+        exclusion_guidance = ""
+        if self.exclusion_words:
+            sample_excluded = list(self.exclusion_words)[:15]  # Show first 15 as examples
+            exclusion_guidance = f"""
+⚠️ EXCLUDED TERMS - DO NOT USE THESE IN YOUR TAGS:
+The following common/generic terms should be AVOIDED:
+{', '.join(sample_excluded)}
+{f'... and {len(self.exclusion_words) - 15} more excluded terms' if len(self.exclusion_words) > 15 else ''}
+
+Generate tags that are SPECIFIC and UNIQUE to this document, avoiding all these common terms.
+"""
+        
         prompt = f"""You are analyzing an Indian government/organizational document. Generate exactly {num_tags} highly SPECIFIC and DESCRIPTIVE meta-data tags in English.
+{exclusion_guidance}
 
 Document Title: {title}
 Description: {description if description else 'N/A'}
@@ -245,6 +278,45 @@ Tags:"""
         result = valid_tags[:expected_count]
         logger.info(f"Returning {len(result)} tags: {result}")
         return result
+    
+    def _filter_excluded_tags(self, tags: List[str]) -> List[str]:
+        """
+        Filter out tags that match exclusion words
+        Uses substring matching to catch variations
+        
+        For example, if "social-justice" is excluded:
+        - "social-justice" (exact) -> excluded
+        - "ministry-of-social-justice" (contains) -> excluded
+        - "social justice programs" (contains) -> excluded
+        
+        Args:
+            tags: List of tags to filter
+            
+        Returns:
+            Filtered list of tags with exclusions removed
+        """
+        filtered_tags = []
+        
+        for tag in tags:
+            tag_lower = tag.lower().strip()
+            # Normalize: replace spaces with hyphens for comparison
+            tag_normalized = tag_lower.replace(' ', '-')
+            
+            # Check if tag should be excluded
+            excluded = False
+            for excluded_word in self.exclusion_words:
+                excluded_normalized = excluded_word.replace(' ', '-')
+                
+                # Check both directions for substring match
+                if excluded_normalized in tag_normalized or tag_normalized in excluded_normalized:
+                    logger.info(f"Excluding tag '{tag}' (matches exclusion term '{excluded_word}')")
+                    excluded = True
+                    break
+            
+            if not excluded:
+                filtered_tags.append(tag)
+        
+        return filtered_tags
     
     def test_connection(self) -> Dict[str, Any]:
         """Test API connection"""

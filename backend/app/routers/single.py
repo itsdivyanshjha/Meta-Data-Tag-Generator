@@ -2,6 +2,8 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from app.models import SinglePDFResponse, TaggingConfig
 from app.services.pdf_extractor import PDFExtractor
 from app.services.ai_tagger import AITagger
+from app.services.exclusion_parser import ExclusionListParser
+from typing import Optional
 import time
 import json
 import logging
@@ -16,14 +18,16 @@ router = APIRouter()
 @router.post("/process", response_model=SinglePDFResponse)
 async def process_single_pdf(
     pdf_file: UploadFile = File(...),
-    config: str = Form(...)
+    config: str = Form(...),
+    exclusion_file: Optional[UploadFile] = File(None)
 ):
-    """![1766297144713](image/single/1766297144713.png)![1766297149855](image/single/1766297149855.png)![1766297161780](image/single/1766297161780.png)
-    Process single PDF and generate tags with automatic OCR support
+    """
+    Process single PDF and generate tags with automatic OCR support and optional exclusion list
     
     Args:
         pdf_file: Uploaded PDF file
         config: JSON string of TaggingConfig
+        exclusion_file: Optional file containing words/phrases to exclude from tags (.txt or .pdf)
     """
     start_time = time.time()
     
@@ -31,6 +35,24 @@ async def process_single_pdf(
         # Parse config
         config_dict = json.loads(config)
         tagging_config = TaggingConfig(**config_dict)
+        
+        # Parse exclusion file if provided
+        if exclusion_file and exclusion_file.filename:
+            logger.info(f"Processing exclusion file: {exclusion_file.filename}")
+            exclusion_bytes = await exclusion_file.read()
+            
+            try:
+                parser = ExclusionListParser()
+                exclusion_words = parser.parse_from_file(exclusion_bytes, exclusion_file.filename)
+                tagging_config.exclusion_words = list(exclusion_words)
+                logger.info(f"Loaded {len(exclusion_words)} exclusion words from {exclusion_file.filename}")
+                logger.info(f"Sample exclusion words: {list(exclusion_words)[:10]}")
+            except Exception as e:
+                logger.error(f"Failed to parse exclusion file: {str(e)}")
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Failed to parse exclusion file: {str(e)}"
+                )
         
         logger.info(f"Processing PDF: {pdf_file.filename}")
         logger.info(f"Using model: {tagging_config.model_name}")
@@ -69,8 +91,12 @@ async def process_single_pdf(
                 detail="Could not extract sufficient text from PDF. The document might be scanned or image-based without OCR support."
             )
         
-        # Generate tags
-        tagger = AITagger(tagging_config.api_key, tagging_config.model_name)
+        # Generate tags with exclusion list
+        tagger = AITagger(
+            tagging_config.api_key, 
+            tagging_config.model_name,
+            exclusion_words=tagging_config.exclusion_words
+        )
         tagging_result = tagger.generate_tags(
             title=extraction_result.get("title", pdf_file.filename or "Untitled"),
             description="",

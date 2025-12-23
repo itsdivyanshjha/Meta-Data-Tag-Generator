@@ -8,6 +8,7 @@ class TaggingConfig(BaseModel):
     model_name: str = Field(default="openai/gpt-4o-mini", description="AI model to use")
     num_pages: int = Field(default=3, ge=1, le=10, description="Number of PDF pages to extract")
     num_tags: int = Field(default=8, ge=3, le=15, description="Number of tags to generate")
+    exclusion_words: Optional[List[str]] = Field(default=None, description="Words/phrases to exclude from tags")
 
 
 class SinglePDFRequest(BaseModel):

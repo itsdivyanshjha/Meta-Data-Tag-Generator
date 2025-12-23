@@ -6,9 +6,10 @@ import { TaggingConfig, BatchProcessResponse } from '@/lib/types'
 
 interface BatchUploadProps {
   config: TaggingConfig
+  exclusionFile?: File | null
 }
 
-export default function BatchUpload({ config }: BatchUploadProps) {
+export default function BatchUpload({ config, exclusionFile }: BatchUploadProps) {
   const [file, setFile] = useState<File | null>(null)
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<BatchProcessResponse | null>(null)
@@ -67,7 +68,7 @@ export default function BatchUpload({ config }: BatchUploadProps) {
     setError(null)
 
     try {
-      const response = await processBatchCSV(file, config)
+      const response = await processBatchCSV(file, config, exclusionFile)
       setResult(response)
     } catch (err) {
       if (err instanceof APIError) {

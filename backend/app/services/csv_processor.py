@@ -17,7 +17,7 @@ class CSVProcessor:
     def __init__(self, config: TaggingConfig):
         self.config = config
         self.extractor = PDFExtractor()
-        self.tagger = AITagger(config.api_key, config.model_name)
+        self.tagger = AITagger(config.api_key, config.model_name, exclusion_words=config.exclusion_words)
         self.file_handler = FileHandler()
     
     def process_csv(self, csv_content: bytes) -> Dict[str, Any]:

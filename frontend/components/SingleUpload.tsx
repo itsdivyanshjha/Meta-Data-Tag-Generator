@@ -6,9 +6,10 @@ import { TaggingConfig, SinglePDFResponse } from '@/lib/types'
 
 interface SingleUploadProps {
   config: TaggingConfig
+  exclusionFile?: File | null
 }
 
-export default function SingleUpload({ config }: SingleUploadProps) {
+export default function SingleUpload({ config, exclusionFile }: SingleUploadProps) {
   const [file, setFile] = useState<File | null>(null)
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<SinglePDFResponse | null>(null)
@@ -78,7 +79,7 @@ export default function SingleUpload({ config }: SingleUploadProps) {
     setError(null)
 
     try {
-      const response = await processSinglePDF(file, config)
+      const response = await processSinglePDF(file, config, exclusionFile)
       console.log('API Response:', response) // Debug log
       setResult(response)
     } catch (err) {

@@ -28,7 +28,7 @@ class PDFExtractor:
     """
     
     # Threshold: if we extract less than this many chars per page, consider it scanned
-    SCANNED_THRESHOLD_CHARS_PER_PAGE = 100  # Increased from 50 for better detection
+    SCANNED_THRESHOLD_CHARS_PER_PAGE = 150  # Increased from 50 for better detection
     
     @staticmethod
     def extract_text(
