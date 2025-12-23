@@ -43,21 +43,32 @@ Returns API information.
 ```
 
 ### POST `/api/single/process`
-Processes a single PDF file and generates tags.
+Processes a single PDF file and generates tags with optional exclusion list filtering.
 
 **Request:**
 - Content-Type: `multipart/form-data`
 - Fields:
-  - `pdf_file`: PDF file (File)
-  - `config`: JSON string with `TaggingConfig`
+  - `pdf_file`: PDF file (File, optional - required if `pdf_url` not provided)
+  - `pdf_url`: URL to PDF file (String, optional - required if `pdf_file` not provided)
+    - Supports any publicly accessible HTTP/HTTPS URL
+    - Examples: CloudFront URLs, S3 URLs, direct file links
+  - `config`: JSON string with `TaggingConfig` (required)
     ```json
     {
       "api_key": "string",
       "model_name": "string",
       "num_pages": 3,
-      "num_tags": 8
+      "num_tags": 8,
+      "exclusion_words": ["word1", "word2"]  // Optional
     }
     ```
+  - `exclusion_file`: Exclusion list file (File, optional)
+    - Supported formats: `.txt`, `.pdf`
+    - Contains words/phrases to exclude from generated tags
+    - Format: One term per line or comma-separated
+    - Comments: Lines starting with `#` are ignored
+
+**Note:** Provide either `pdf_file` OR `pdf_url`, not both.
 
 **Response:**
 ```json
@@ -76,13 +87,27 @@ Processes a single PDF file and generates tags.
 ```
 
 ### POST `/api/batch/process`
-Processes a CSV file containing multiple documents.
+Processes a CSV file containing multiple documents with optional exclusion list filtering.
 
 **Request:**
 - Content-Type: `multipart/form-data`
 - Fields:
-  - `csv_file`: CSV file (File)
-  - `config`: JSON string with `TaggingConfig`
+  - `csv_file`: CSV file (File, required)
+  - `config`: JSON string with `TaggingConfig` (required)
+    ```json
+    {
+      "api_key": "string",
+      "model_name": "string",
+      "num_pages": 3,
+      "num_tags": 8,
+      "exclusion_words": ["word1", "word2"]  // Optional
+    }
+    ```
+  - `exclusion_file`: Exclusion list file (File, optional)
+    - Supported formats: `.txt`, `.pdf`
+    - Contains words/phrases to exclude from generated tags
+    - Format: One term per line or comma-separated
+    - Comments: Lines starting with `#` are ignored
 
 **CSV Format:**
 - Required columns: `title`, `file_source_type`, `file_path`
@@ -145,6 +170,56 @@ Simple status check.
 }
 ```
 
+## Features
+
+### URL-Based Document Processing
+The system supports processing PDFs from URLs in addition to file uploads. This is useful for:
+- Processing documents from public websites
+- Handling CloudFront/S3 URLs
+- Batch processing without downloading files first
+- Integration with external document management systems
+
+**Supported URL types:**
+- Direct PDF URLs: `https://example.com/document.pdf`
+- CloudFront URLs: `https://d1581jr3fp95xu.cloudfront.net/path/to/file.pdf`
+- S3 public URLs: `https://bucket.s3.region.amazonaws.com/file.pdf`
+- Government/institutional sites: `https://socialjustice.gov.in/writereaddata/UploadFile/66991763713697.pdf`
+
+**How it works:**
+- User provides a URL instead of uploading a file
+- Backend downloads the PDF (60-second timeout, 50MB limit)
+- PDF is processed the same way as uploaded files
+- Preview works directly with the URL (if CORS allows)
+
+### Exclusion List Filtering
+The system supports exclusion lists to filter out common/generic terms that appear repeatedly across documents. This improves ElasticSearch searchability by ensuring tags are specific and unique to each document.
+
+**How it works:**
+- Upload a `.txt` or `.pdf` file containing exclusion terms
+- Terms can be listed one per line or comma-separated
+- Comments (lines starting with `#`) are ignored
+- The system uses a two-layer approach:
+  1. **Pre-generation**: AI is instructed to avoid excluded terms
+  2. **Post-processing**: Any excluded terms that slip through are filtered out
+- **Guaranteed tag count**: If you request 5 tags and 2 get filtered, you still get 5 tags (system requests extra tags from AI to compensate)
+
+**Example exclusion list (`exclusion-list.txt`):**
+```
+# Common government organizations
+government-india
+ministry-of-social-justice
+social-justice
+
+# Generic document types
+annual-report
+newsletter
+policy-document
+
+# Overly generic terms
+empowerment
+constitutional-provisions
+```
+
 ## Technical Stack
 
 - **Backend Framework**: FastAPI (Python 3.8+)
@@ -152,3 +227,4 @@ Simple status check.
 - **PDF Text Extraction**: PyPDF2 (text-based PDFs)
 - **OCR**: Tesseract OCR with `pytesseract`, `pdf2image`, `Pillow`
 - **AI Client**: OpenAI Python SDK (configured for OpenRouter)
+- **Exclusion Parsing**: Custom parser supporting `.txt` and `.pdf` formats

@@ -16,20 +16,52 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
   const [error, setError] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  
+  // URL input state
+  const [pdfUrl, setPdfUrl] = useState<string>('')
+  const [urlError, setUrlError] = useState<string | null>(null)
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const selectedFile = e.target.files[0]
       if (selectedFile.type === 'application/pdf') {
         setFile(selectedFile)
+        setPdfUrl('') // Clear URL if file selected
         setResult(null)
         setError(null)
+        setUrlError(null)
         // Create preview URL
         const url = URL.createObjectURL(selectedFile)
         setPreviewUrl(url)
       } else {
         setError('Please select a PDF file')
       }
+    }
+  }
+
+  const handleUrlChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const url = e.target.value
+    setPdfUrl(url)
+    setUrlError(null)
+    
+    if (url) {
+      setFile(null) // Clear file if URL entered
+      setResult(null)
+      setError(null)
+      
+      // Validate URL format
+      try {
+        if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
+          setUrlError('URL must start with http:// or https://')
+        } else if (url) {
+          // Set preview URL directly for valid URLs
+          setPreviewUrl(url)
+        }
+      } catch (err) {
+        setUrlError('Invalid URL format')
+      }
+    } else {
+      setPreviewUrl(null)
     }
   }
 
@@ -40,8 +72,10 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
     const droppedFile = e.dataTransfer.files[0]
     if (droppedFile && droppedFile.type === 'application/pdf') {
       setFile(droppedFile)
+      setPdfUrl('') // Clear URL if file dropped
       setResult(null)
       setError(null)
+      setUrlError(null)
       const url = URL.createObjectURL(droppedFile)
       setPreviewUrl(url)
     } else {
@@ -60,8 +94,19 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
   }, [])
 
   const handleSubmit = async () => {
-    if (!file) {
-      setError('Please select a PDF file')
+    // Validate input
+    if (!file && !pdfUrl) {
+      setError('Please select a PDF file or enter a PDF URL')
+      return
+    }
+
+    if (file && pdfUrl) {
+      setError('Please provide either a file or a URL, not both')
+      return
+    }
+
+    if (pdfUrl && !pdfUrl.startsWith('http://') && !pdfUrl.startsWith('https://')) {
+      setError('URL must start with http:// or https://')
       return
     }
 
@@ -77,9 +122,10 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
 
     setLoading(true)
     setError(null)
+    setUrlError(null)
 
     try {
-      const response = await processSinglePDF(file, config, exclusionFile)
+      const response = await processSinglePDF(file, config, exclusionFile, pdfUrl || undefined)
       console.log('API Response:', response) // Debug log
       setResult(response)
     } catch (err) {
@@ -150,6 +196,7 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
                   setFile(null)
                   setResult(null)
                   setPreviewUrl(null)
+                  setError(null)
                 }}
                 className="text-sm text-gray-500 hover:text-red-600 transition-colors"
               >
@@ -171,10 +218,48 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
           )}
         </div>
 
+        {/* OR Separator */}
+        <div className="relative">
+          <div className="absolute inset-0 flex items-center">
+            <div className="w-full border-t border-gray-300"></div>
+          </div>
+          <div className="relative flex justify-center text-sm">
+            <span className="px-2 bg-white text-gray-500">OR</span>
+          </div>
+        </div>
+
+        {/* URL Input */}
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-gray-700">
+            Enter PDF URL
+          </label>
+          <input
+            type="url"
+            value={pdfUrl}
+            onChange={handleUrlChange}
+            placeholder="https://example.com/document.pdf"
+            disabled={!!file || loading}
+            className={`input-field ${file ? 'opacity-50 cursor-not-allowed' : ''}`}
+          />
+          <p className="text-xs text-gray-500">
+            Paste a direct link to any publicly accessible PDF file
+          </p>
+          {urlError && (
+            <p className="text-xs text-red-600">
+              {urlError}
+            </p>
+          )}
+          {pdfUrl && !urlError && (
+            <div className="p-2 bg-green-50 border border-green-200 rounded text-xs text-green-700">
+              ✓ URL ready: {pdfUrl.length > 60 ? pdfUrl.substring(0, 60) + '...' : pdfUrl}
+            </div>
+          )}
+        </div>
+
         {/* Submit Button */}
         <button
           onClick={handleSubmit}
-          disabled={loading || !file || !config.api_key || !config.model_name}
+          disabled={loading || (!file && !pdfUrl) || !config.api_key || !config.model_name || !!urlError}
           className="btn-primary w-full"
         >
           {loading ? (

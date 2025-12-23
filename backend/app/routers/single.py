@@ -17,17 +17,19 @@ router = APIRouter()
 
 @router.post("/process", response_model=SinglePDFResponse)
 async def process_single_pdf(
-    pdf_file: UploadFile = File(...),
+    pdf_file: Optional[UploadFile] = File(None),
     config: str = Form(...),
-    exclusion_file: Optional[UploadFile] = File(None)
+    exclusion_file: Optional[UploadFile] = File(None),
+    pdf_url: Optional[str] = Form(None)
 ):
     """
     Process single PDF and generate tags with automatic OCR support and optional exclusion list
     
     Args:
-        pdf_file: Uploaded PDF file
+        pdf_file: Uploaded PDF file (optional if pdf_url provided)
         config: JSON string of TaggingConfig
         exclusion_file: Optional file containing words/phrases to exclude from tags (.txt or .pdf)
+        pdf_url: Optional URL to download PDF from (alternative to pdf_file)
     """
     start_time = time.time()
     
@@ -54,18 +56,72 @@ async def process_single_pdf(
                     detail=f"Failed to parse exclusion file: {str(e)}"
                 )
         
-        logger.info(f"Processing PDF: {pdf_file.filename}")
         logger.info(f"Using model: {tagging_config.model_name}")
         
-        # Validate file type
-        if not pdf_file.filename or not pdf_file.filename.lower().endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Invalid file type. Please upload a PDF file.")
+        # Determine source and get PDF bytes
+        pdf_bytes = None
+        document_name = "Untitled"
         
-        # Read PDF
-        pdf_bytes = await pdf_file.read()
+        # Check if both file and URL provided
+        if pdf_file and pdf_file.filename and pdf_url:
+            raise HTTPException(
+                status_code=400, 
+                detail="Please provide either a PDF file OR a URL, not both."
+            )
         
-        if not pdf_bytes:
-            raise HTTPException(status_code=400, detail="Empty PDF file")
+        # Option 1: File upload
+        if pdf_file and pdf_file.filename:
+            logger.info(f"Processing uploaded file: {pdf_file.filename}")
+            
+            # Validate file type
+            if not pdf_file.filename.lower().endswith('.pdf'):
+                raise HTTPException(status_code=400, detail="Invalid file type. Please upload a PDF file.")
+            
+            pdf_bytes = await pdf_file.read()
+            document_name = pdf_file.filename
+            
+            if not pdf_bytes:
+                raise HTTPException(status_code=400, detail="Empty PDF file")
+        
+        # Option 2: URL download
+        elif pdf_url:
+            logger.info(f"Downloading PDF from URL: {pdf_url}")
+            
+            # Validate URL format
+            if not pdf_url.startswith(('http://', 'https://')):
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Invalid URL. Must start with http:// or https://"
+                )
+            
+            # Download PDF from URL
+            from app.services.file_handler import FileHandler
+            handler = FileHandler()
+            download_result = handler.download_file("url", pdf_url)
+            
+            if not download_result["success"]:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Failed to download PDF from URL: {download_result.get('error', 'Unknown error')}"
+                )
+            
+            pdf_bytes = download_result["file_bytes"]
+            
+            # Extract document name from URL
+            from urllib.parse import urlparse, unquote
+            parsed_url = urlparse(pdf_url)
+            document_name = unquote(parsed_url.path.split('/')[-1]) if parsed_url.path else "URL Document"
+            
+            if not document_name.endswith('.pdf'):
+                document_name += '.pdf'
+            
+            logger.info(f"Downloaded {len(pdf_bytes)} bytes from URL")
+        
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail="Please provide either a PDF file or a PDF URL."
+            )
         
         # Extract text (with automatic OCR fallback)
         extractor = PDFExtractor()
@@ -98,7 +154,7 @@ async def process_single_pdf(
             exclusion_words=tagging_config.exclusion_words
         )
         tagging_result = tagger.generate_tags(
-            title=extraction_result.get("title", pdf_file.filename or "Untitled"),
+            title=extraction_result.get("title", document_name or "Untitled"),
             description="",
             content=extraction_result["extracted_text"],
             num_tags=tagging_config.num_tags
@@ -118,7 +174,7 @@ async def process_single_pdf(
         
         response = SinglePDFResponse(
             success=True,
-            document_title=extraction_result.get("title", pdf_file.filename or "Untitled"),
+            document_title=extraction_result.get("title", document_name or "Untitled"),
             tags=tagging_result["tags"],
             extracted_text_preview=extraction_result["extracted_text"][:500],
             processing_time=round(processing_time, 2),
