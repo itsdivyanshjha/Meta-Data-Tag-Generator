@@ -161,7 +161,7 @@ The following common/generic terms should be AVOIDED:
 Generate tags that are SPECIFIC and UNIQUE to this document, avoiding all these common terms.
 """
         
-        prompt = f"""You are analyzing an Indian government/organizational document. Generate exactly {num_tags} highly SPECIFIC and DESCRIPTIVE meta-data tags in English.
+        prompt = f"""You are analyzing an Indian government/organizational document. Your task is to generate exactly {num_tags} HIGHLY SPECIFIC and UNIQUE meta-data tags in English.
 {exclusion_guidance}
 
 Document Title: {title}
@@ -170,47 +170,83 @@ Description: {description if description else 'N/A'}
 Content Preview:
 {content_preview}
 
-TAGGING STRATEGY - Be SPECIFIC, not generic:
+CRITICAL RULES - READ CAREFULLY:
 
-1. ORGANIZATION/MINISTRY (if mentioned):
-   - Identify the specific ministry, department, or organization
-   - Examples: "ministry of social justice", "dr ambedkar foundation", "ncsc"
+🚫 NEVER USE THESE GENERIC/USELESS TAGS:
+- Structural info: "contact details", "delhi address", "phone number", "email", "address", "office location"
+- Document metadata: "hindi document", "hindi language", "publication", "document", "report"
+- Generic descriptors: "government organization", "ministry", "department", "foundation" (without specifics)
+- Vague terms: "social welfare", "empowerment", "development" (too broad)
 
-2. DOCUMENT TYPE (be specific):
-   - Don't just say "annual report" - add context
-   - Examples: "annual report 2019-20", "quarterly newsletter", "policy document"
+✅ ALWAYS USE SPECIFIC, SEARCHABLE TAGS:
 
-3. MAIN TOPICS/THEMES (specific subjects):
-   - Identify actual topics discussed
-   - Examples: "backward classes welfare", "legal aid services", "digital literacy programs"
-   - NOT generic terms like "government policy"
+1. SPECIFIC ORGANIZATION NAMES (exact names only):
+   ✅ "dr ambedkar foundation"
+   ✅ "national commission for scheduled castes"
+   ❌ "government organization"
 
-4. KEY PEOPLE/FIGURES (if mentioned):
-   - Examples: "dr br ambedkar", "sant ravidas", specific ministers
+2. DOCUMENT TYPE WITH CONTEXT (be precise):
+   ✅ "annual report 2015-16"
+   ✅ "quarterly newsletter december 2023"
+   ❌ "annual report" (too vague)
+   ❌ "publication"
 
-5. LOCATIONS/REGIONS (if relevant):
-   - Specific states, regions, or areas mentioned
+3. SPECIFIC PROGRAMS/SCHEMES (actual names):
+   ✅ "pradhan mantri rojgar yojana"
+   ✅ "post matric scholarship sc students"
+   ✅ "skill development training program"
+   ❌ "scholarship programs" (too generic)
+   ❌ "welfare schemes"
 
-6. TIME PERIOD (specific dates/years):
-   - Examples: "2019-20", "february 2016", "31st january"
+4. CONCRETE TOPICS/EVENTS (specific subjects):
+   ✅ "sant ravidas jayanti celebration 2016"
+   ✅ "backward classes census data analysis"
+   ✅ "legal aid clinics for sc st communities"
+   ❌ "social welfare"
+   ❌ "empowerment"
 
-7. PROGRAMS/SCHEMES (specific names):
-   - Actual program names mentioned
+5. SPECIFIC BENEFICIARY GROUPS (when mentioned):
+   ✅ "scheduled caste entrepreneurs"
+   ✅ "obc artisan communities"
+   ✅ "divyang students higher education"
+   ❌ "scheduled castes" (alone, too broad)
 
-8. TARGET GROUPS (if specified):
-   - Examples: "scheduled castes", "obc communities", "divyang persons"
+6. ACTIONABLE CONTENT (what the document does):
+   ✅ "budget allocation breakdown 2015"
+   ✅ "achievement statistics quarterly"
+   ✅ "workshop guidelines for ngos"
+   ❌ "information"
+   ❌ "details"
 
-AVOID THESE GENERIC TAGS:
-❌ "government policy", "organization details", "contact information", "document type", "legal system", "date 2016"
+7. DATES WITH CONTEXT (specific time references):
+   ✅ "budget 2015-16"
+   ✅ "february 2016 activities"
+   ❌ "2015" (alone)
 
-USE THESE SPECIFIC TAGS:
-✅ "social justice ministry", "ravidas jayanti 2016", "sc welfare schemes", "legal aid for marginalized", "february 2016 newsletter"
+QUALITY CHECK - Each tag must be:
+- SEARCHABLE: Would someone search for this exact phrase?
+- UNIQUE: Does it distinguish this document from others?
+- MEANINGFUL: Does it describe content, not format?
+- SPECIFIC: Could it be more precise? If yes, make it so!
+
+BAD EXAMPLE TAGS (NEVER do this):
+{{"contact details", "delhi address", "hindi document", "government organization", "social welfare", "empowerment", "publication"}}
+
+GOOD EXAMPLE TAGS (ALWAYS do this):
+{{"dr ambedkar foundation annual report 2015", "sc welfare budget allocation", "backward classes development schemes", "pradhan mantri kaushal vikas yojana", "scholarship programs marginalized students", "sant ravidas jayanti 2016", "ncsc grievance redressal statistics", "legal aid awareness camps"}}
+
+NOW GENERATE {num_tags} TAGS FOR THIS DOCUMENT:
+- Each tag MUST be specific and searchable
+- NO generic terms like "contact details", "address", "hindi document", "organization"
+- Focus on WHAT the document contains, not document metadata
+- Use full names and specific program/scheme names
+- Include year/date context where relevant
 
 Output Format:
-- ONLY comma-separated tags
-- ALL tags in lowercase English
+- Comma-separated tags ONLY
+- Lowercase English
 - {num_tags} tags exactly
-- NO explanations, NO numbering
+- NO explanations
 
 Tags:"""
         
@@ -219,6 +255,21 @@ Tags:"""
     def _parse_tags(self, tags_text: str, expected_count: int) -> List[str]:
         """Parse and clean tags from AI response (English only output)"""
         logger.info(f"Parsing tags from: '{tags_text}'")
+        
+        # Generic/useless terms to automatically filter out
+        GENERIC_TERMS = {
+            'contact details', 'contact information', 'contact info',
+            'delhi address', 'address', 'office address', 'phone number', 'email',
+            'hindi document', 'hindi language', 'english document', 'language',
+            'publication', 'document', 'report', 'information',
+            'government organization', 'organization', 'ministry', 'department', 'foundation',
+            'social welfare', 'empowerment', 'development',
+            'details', 'information', 'data',
+            'office location', 'headquarters', 'contact',
+            'annual report', 'newsletter',  # Too generic without year
+            'government', 'india', 'organization details',
+            'publication date', 'published', 'pdf', 'document type'
+        }
         
         # Remove any markdown formatting
         tags_text = tags_text.replace('```', '').replace('*', '').replace('`', '').replace('"', '').strip()
@@ -243,6 +294,8 @@ Tags:"""
         
         # Clean and validate tags (English only)
         valid_tags = []
+        rejected_generic = []
+        
         for tag in tags:
             if not tag:
                 continue
@@ -262,6 +315,21 @@ Tags:"""
             
             logger.info(f"Cleaned tag: '{original_tag}' -> '{tag}' (length: {len(tag)})")
             
+            # Check if tag is too generic
+            if tag in GENERIC_TERMS:
+                logger.warning(f"Tag rejected (too generic): '{tag}'")
+                rejected_generic.append(tag)
+                continue
+            
+            # Check if tag contains only generic terms
+            words = tag.split()
+            if len(words) == 1 and tag in ['hindi', 'english', 'contact', 'address', 'document', 
+                                            'report', 'publication', 'information', 'details',
+                                            'government', 'organization', 'ministry', 'foundation']:
+                logger.warning(f"Tag rejected (single generic word): '{tag}'")
+                rejected_generic.append(tag)
+                continue
+            
             # Validate: must be ASCII/English only
             if tag and all(ord(c) < 128 for c in tag):
                 if len(tag) >= 2 and len(tag) <= 100 and tag not in valid_tags:
@@ -271,6 +339,9 @@ Tags:"""
                     logger.info(f"Tag rejected: '{tag}' (length: {len(tag)}, duplicate: {tag in valid_tags})")
             else:
                 logger.info(f"Tag rejected (non-ASCII): '{tag}'")
+        
+        if rejected_generic:
+            logger.warning(f"Rejected {len(rejected_generic)} generic tags: {rejected_generic}")
         
         logger.info(f"Final valid tags ({len(valid_tags)}): {valid_tags}")
         

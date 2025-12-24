@@ -15,9 +15,18 @@ Document metadata tagging system using AI and OCR.
 
 ### Tesseract OCR
 - **Type**: Local OCR engine (CLI tool)
-- **Purpose**: Text extraction from scanned PDF images
+- **Purpose**: Text extraction from scanned PDF images (fast path)
 - **Languages**: Hindi (`hin`) and English (`eng`)
 - **Usage**: Converts PDF pages to images, performs OCR, returns Unicode text
+- **Strengths**: Fast, lightweight, good for Hindi/English documents
+
+### EasyOCR
+- **Type**: Deep learning OCR engine (Python library)
+- **Purpose**: Advanced text extraction for complex Indian languages (high accuracy)
+- **Languages**: 80+ languages including Hindi, Tamil, Telugu, Bengali, Kannada, Malayalam, Marathi, Gujarati, Punjabi, and more
+- **Model**: CNN + LSTM neural networks
+- **Usage**: Automatic fallback when Tesseract confidence is low (<60%)
+- **Strengths**: Superior accuracy for complex scripts, handles ligatures, better on low-quality scans
 
 ### AWS S3 (Optional)
 - **Library**: `boto3`
@@ -225,6 +234,20 @@ constitutional-provisions
 - **Backend Framework**: FastAPI (Python 3.8+)
 - **Frontend Framework**: Next.js (TypeScript)
 - **PDF Text Extraction**: PyPDF2 (text-based PDFs)
-- **OCR**: Tesseract OCR with `pytesseract`, `pdf2image`, `Pillow`
+- **OCR Primary**: Tesseract OCR with `pytesseract`, `pdf2image`, `Pillow` (fast, Hindi+English)
+- **OCR Enhanced**: EasyOCR with PyTorch (accurate, 80+ languages including all Indian languages)
 - **AI Client**: OpenAI Python SDK (configured for OpenRouter)
 - **Exclusion Parsing**: Custom parser supporting `.txt` and `.pdf` formats
+
+### Hybrid OCR Approach
+
+The system uses a smart 3-tier extraction strategy:
+
+1. **PyPDF2** (fastest): Tries text-based extraction first
+2. **Tesseract OCR** (fast): Fallback for scanned documents, good for Hindi/English
+3. **EasyOCR** (most accurate): Automatic fallback if:
+   - Tesseract confidence < 60%
+   - Complex Indian scripts detected
+   - Better extraction quality needed
+
+This ensures optimal speed and accuracy for all document types.

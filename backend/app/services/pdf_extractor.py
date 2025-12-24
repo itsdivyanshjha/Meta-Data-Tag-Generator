@@ -13,6 +13,14 @@ try:
 except ImportError:
     OCR_AVAILABLE = False
 
+# EasyOCR import with graceful fallback
+try:
+    import easyocr
+    import numpy as np
+    EASYOCR_AVAILABLE = True
+except ImportError:
+    EASYOCR_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,14 +29,48 @@ class PDFExtractor:
     Hybrid PDF text extractor with automatic OCR fallback for scanned documents
     
     Features:
-    - Primary: PyPDF2 for text-based PDFs (fast)
-    - Fallback: Tesseract OCR for scanned PDFs (slower but handles images)
+    - Primary: PyPDF2 for text-based PDFs (fastest)
+    - Fallback 1: Tesseract OCR for scanned PDFs (fast, good for Hindi)
+    - Fallback 2: EasyOCR for complex Indian languages (slower but more accurate)
     - Auto-detection: Determines if PDF is scanned based on text extraction results
-    - Multi-language: Supports English and Hindi (Devanagari script)
+    - Multi-language: Supports 80+ languages including all Indian languages
     """
     
     # Threshold: if we extract less than this many chars per page, consider it scanned
-    SCANNED_THRESHOLD_CHARS_PER_PAGE = 150  # Increased from 50 for better detection
+    SCANNED_THRESHOLD_CHARS_PER_PAGE = 150
+    
+    # Confidence threshold to try EasyOCR after Tesseract
+    TESSERACT_CONFIDENCE_THRESHOLD = 60
+    
+    # EasyOCR reader instance (loaded once, reused)
+    _easyocr_reader = None
+    
+    @classmethod
+    def get_easyocr_reader(cls, languages=['hi', 'en']):
+        """
+        Lazy load EasyOCR reader (loads model into memory once)
+        
+        Args:
+            languages: List of language codes (e.g., ['hi', 'en'] for Hindi + English)
+            
+        Returns:
+            EasyOCR Reader instance or None if not available
+        """
+        if not EASYOCR_AVAILABLE:
+            logger.warning("EasyOCR not available. Install: pip install easyocr torch torchvision")
+            return None
+        
+        if cls._easyocr_reader is None:
+            try:
+                logger.info(f"Loading EasyOCR with languages: {languages}")
+                # gpu=False for compatibility, set to True if GPU available
+                cls._easyocr_reader = easyocr.Reader(languages, gpu=False, verbose=False)
+                logger.info("EasyOCR loaded successfully")
+            except Exception as e:
+                logger.error(f"Failed to load EasyOCR: {str(e)}")
+                return None
+        
+        return cls._easyocr_reader
     
     @staticmethod
     def extract_text(
@@ -71,7 +113,7 @@ class PDFExtractor:
                 pypdf_result["ocr_confidence"] = None
                 return pypdf_result
             
-            # Step 4: If scanned, try OCR fallback
+            # Step 4: If scanned, try OCR fallback (Tesseract first, then EasyOCR if needed)
             logger.info("Document appears to be scanned. Attempting OCR extraction...")
             
             if not OCR_AVAILABLE:
@@ -82,24 +124,92 @@ class PDFExtractor:
                 pypdf_result["error"] = "Document is scanned but OCR libraries not installed"
                 return pypdf_result
             
-            ocr_result = PDFExtractor._extract_with_ocr(
+            # Try Tesseract first (faster)
+            tesseract_result = PDFExtractor._extract_with_ocr(
                 pdf_bytes, 
                 num_pages, 
                 ocr_languages
             )
             
-            if ocr_result["success"]:
-                # Use the better title from PyPDF2 if available
-                if pypdf_result["title"] != "Untitled Document":
-                    ocr_result["title"] = pypdf_result["title"]
-                return ocr_result
+            # Check if Tesseract was successful and had good confidence
+            if tesseract_result["success"]:
+                tesseract_confidence = tesseract_result.get("ocr_confidence", 0)
+                tesseract_text_length = len(tesseract_result.get("extracted_text", "").strip())
+                
+                logger.info(f"Tesseract OCR completed. Confidence: {tesseract_confidence}%, Text length: {tesseract_text_length}")
+                
+                # If Tesseract confidence is good, use it
+                if tesseract_confidence >= PDFExtractor.TESSERACT_CONFIDENCE_THRESHOLD and tesseract_text_length > 100:
+                    logger.info(f"Using Tesseract result (good confidence: {tesseract_confidence}%)")
+                    # Use better title from PyPDF2 if available
+                    if pypdf_result["title"] != "Untitled Document":
+                        tesseract_result["title"] = pypdf_result["title"]
+                    return tesseract_result
+                
+                # If Tesseract confidence is low, try EasyOCR for better accuracy
+                logger.info(f"Tesseract confidence low ({tesseract_confidence}%). Trying EasyOCR for better accuracy...")
             else:
-                # OCR failed, return PyPDF2 results with warning
-                pypdf_result["is_scanned"] = True
-                pypdf_result["extraction_method"] = "pypdf2_low_confidence"
-                pypdf_result["ocr_confidence"] = None
-                pypdf_result["error"] = f"OCR extraction failed: {ocr_result.get('error', 'Unknown')}"
-                return pypdf_result
+                logger.warning("Tesseract OCR failed. Trying EasyOCR...")
+            
+            # Step 5: Try EasyOCR as fallback or for better accuracy
+            if EASYOCR_AVAILABLE:
+                easyocr_result = PDFExtractor._extract_with_easyocr(pdf_bytes, num_pages)
+                
+                if easyocr_result["success"]:
+                    easyocr_text_length = len(easyocr_result.get("extracted_text", "").strip())
+                    easyocr_confidence = easyocr_result.get("ocr_confidence", 0)
+                    
+                    # Compare EasyOCR with Tesseract if both succeeded
+                    if tesseract_result["success"]:
+                        tesseract_confidence = tesseract_result.get("ocr_confidence", 0)
+                        
+                        # If Tesseract confidence is below threshold, prioritize EasyOCR
+                        if tesseract_confidence < PDFExtractor.TESSERACT_CONFIDENCE_THRESHOLD:
+                            # Prefer EasyOCR unless it extracts significantly less text (< 50% of Tesseract)
+                            if easyocr_text_length >= tesseract_text_length * 0.5:
+                                logger.info(f"Using EasyOCR result (Tesseract confidence {tesseract_confidence}% < threshold {PDFExtractor.TESSERACT_CONFIDENCE_THRESHOLD}%. "
+                                          f"EasyOCR: {easyocr_text_length} chars, {easyocr_confidence}% confidence)")
+                                if pypdf_result["title"] != "Untitled Document":
+                                    easyocr_result["title"] = pypdf_result["title"]
+                                return easyocr_result
+                            else:
+                                logger.warning(f"EasyOCR extracted too little text ({easyocr_text_length} vs {tesseract_text_length}). "
+                                             f"Using Tesseract despite low confidence ({tesseract_confidence}%)")
+                                if pypdf_result["title"] != "Untitled Document":
+                                    tesseract_result["title"] = pypdf_result["title"]
+                                return tesseract_result
+                        else:
+                            # Tesseract confidence is good, compare text lengths
+                            if easyocr_text_length > tesseract_text_length * 0.8:
+                                logger.info(f"Using EasyOCR result (extracted {easyocr_text_length} chars vs Tesseract {tesseract_text_length})")
+                                if pypdf_result["title"] != "Untitled Document":
+                                    easyocr_result["title"] = pypdf_result["title"]
+                                return easyocr_result
+                            else:
+                                logger.info(f"Using Tesseract result (better than EasyOCR: {tesseract_text_length} vs {easyocr_text_length} chars)")
+                                if pypdf_result["title"] != "Untitled Document":
+                                    tesseract_result["title"] = pypdf_result["title"]
+                                return tesseract_result
+                    else:
+                        # Tesseract failed, use EasyOCR
+                        logger.info("Using EasyOCR result (Tesseract failed)")
+                        if pypdf_result["title"] != "Untitled Document":
+                            easyocr_result["title"] = pypdf_result["title"]
+                        return easyocr_result
+            
+            # Fallback to Tesseract if EasyOCR not available or failed
+            if tesseract_result["success"]:
+                logger.info("Using Tesseract result (EasyOCR not available or failed)")
+                if pypdf_result["title"] != "Untitled Document":
+                    tesseract_result["title"] = pypdf_result["title"]
+                return tesseract_result
+            
+            # Last resort: return PyPDF2 result with error
+            pypdf_result["is_scanned"] = True
+            pypdf_result["extraction_method"] = "pypdf2_ocr_all_failed"
+            pypdf_result["ocr_confidence"] = None
+            pypdf_result["error"] = "All OCR methods failed"
+            return pypdf_result
             
         except Exception as e:
             logger.error(f"Error in extract_text: {str(e)}", exc_info=True)
@@ -285,6 +395,144 @@ class PDFExtractor:
                 "title": "Untitled Document",
                 "is_scanned": True,
                 "extraction_method": "ocr_failed",
+                "ocr_confidence": None
+            }
+    
+    @staticmethod
+    def _extract_with_easyocr(pdf_bytes: bytes, num_pages: int) -> Dict[str, Any]:
+        """
+        Extract text using EasyOCR (best for complex Indian languages)
+        
+        EasyOCR supports 80+ languages including:
+        - All Indian languages (Hindi, Tamil, Telugu, Bengali, Kannada, Malayalam, etc.)
+        - Complex scripts and ligatures
+        - Better accuracy on low-quality scans
+        
+        Args:
+            pdf_bytes: PDF file as bytes
+            num_pages: Number of pages to extract
+            
+        Returns:
+            dict with extracted_text and OCR metadata
+        """
+        try:
+            logger.info("Starting EasyOCR extraction...")
+            
+            # Convert PDF to images
+            images = convert_from_bytes(
+                pdf_bytes,
+                first_page=1,
+                last_page=num_pages,
+                dpi=300  # Optimal DPI for OCR
+            )
+            
+            logger.info(f"Converted PDF to {len(images)} images for EasyOCR")
+            
+            # Get EasyOCR reader (supports Hindi + English by default)
+            # Can be extended to support more languages: ['hi', 'ta', 'te', 'bn', 'en']
+            reader = PDFExtractor.get_easyocr_reader(['hi', 'en'])
+            
+            if not reader:
+                return {
+                    "success": False,
+                    "error": "EasyOCR reader not available",
+                    "extracted_text": "",
+                    "page_count": 0,
+                    "pages_extracted": 0,
+                    "title": "Untitled Document",
+                    "is_scanned": True,
+                    "extraction_method": "easyocr_failed",
+                    "ocr_confidence": None
+                }
+            
+            # OCR each image
+            extracted_text = ""
+            confidence_scores = []
+            
+            for idx, image in enumerate(images):
+                logger.info(f"EasyOCR processing page {idx + 1}/{len(images)}...")
+                
+                # Convert PIL image to numpy array (required by EasyOCR)
+                img_array = np.array(image)
+                
+                # Apply same preprocessing as Tesseract for consistency
+                try:
+                    # Convert to grayscale
+                    if len(img_array.shape) == 3:
+                        from PIL import Image as PILImage
+                        pil_img = PILImage.fromarray(img_array)
+                        pil_img = pil_img.convert('L')
+                        
+                        # Enhance contrast
+                        enhancer = ImageEnhance.Contrast(pil_img)
+                        pil_img = enhancer.enhance(2.0)
+                        
+                        img_array = np.array(pil_img)
+                except Exception as prep_error:
+                    logger.warning(f"Image preprocessing failed: {prep_error}, using original")
+                
+                # Run EasyOCR
+                # Returns: list of ([bbox], text, confidence)
+                results = reader.readtext(img_array, detail=1)
+                
+                # Extract text and confidence
+                page_text_parts = []
+                page_confidences = []
+                
+                for (bbox, text, conf) in results:
+                    if text.strip():  # Only add non-empty text
+                        page_text_parts.append(text)
+                        page_confidences.append(conf * 100)  # Convert to percentage
+                
+                # Join text parts with spaces
+                page_text = ' '.join(page_text_parts)
+                extracted_text += page_text + "\n"
+                
+                # Calculate average confidence for this page
+                if page_confidences:
+                    avg_page_conf = sum(page_confidences) / len(page_confidences)
+                    confidence_scores.append(avg_page_conf)
+                
+                logger.info(f"EasyOCR page {idx + 1}: extracted {len(page_text)} chars, "
+                          f"confidence: {avg_page_conf:.1f}%" if page_confidences else "no confidence data")
+            
+            # Calculate overall confidence
+            overall_confidence = (
+                sum(confidence_scores) / len(confidence_scores) 
+                if confidence_scores else 0
+            )
+            
+            # Clean text (preserve Unicode for Indian languages)
+            extracted_text = PDFExtractor._clean_text_unicode_safe(extracted_text)
+            
+            # Extract title
+            title = PDFExtractor._extract_title_from_text(extracted_text)
+            
+            logger.info(f"EasyOCR extraction complete. Extracted {len(extracted_text)} chars, "
+                       f"overall confidence: {overall_confidence:.1f}%")
+            
+            return {
+                "success": True,
+                "extracted_text": extracted_text,
+                "page_count": len(images),
+                "pages_extracted": len(images),
+                "title": title,
+                "is_scanned": True,
+                "extraction_method": "easyocr",
+                "ocr_confidence": round(overall_confidence, 2)
+            }
+            
+        except Exception as e:
+            logger.error(f"EasyOCR extraction failed: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e),
+                "extracted_text": "",
+                "page_count": 0,
+                "pages_extracted": 0,
+                "title": "Untitled Document",
+                "is_scanned": True,
+                "extraction_method": "easyocr_failed",
                 "ocr_confidence": None
             }
     
