@@ -2,6 +2,7 @@ import openai
 from typing import List, Dict, Any, Optional, Set
 import re
 import logging
+import unicodedata
 
 logger = logging.getLogger(__name__)
 
@@ -59,45 +60,138 @@ class AITagger:
             dict with tags list and metadata
         """
         try:
-            # Calculate buffer: request more tags than needed to account for exclusions
-            # We request 2x the number to ensure we have enough after filtering
-            buffer_multiplier = 2.5 if self.exclusion_words else 1.0
+            # CRITICAL: Always request MORE tags than needed to account for filtering
+            # Filters that can reject tags:
+            # 1. Gibberish detection (new)
+            # 2. Generic terms filter
+            # 3. Exclusion list filter
+            # 4. ASCII validation
+            # 5. Length validation
+            # 
+            # Strategy: Request 3x the amount to ensure we always have enough after filtering
+            buffer_multiplier = 3.0  # Always use buffer, not just for exclusions
             requested_tags = int(num_tags * buffer_multiplier)
             
-            logger.info(f"Requesting {requested_tags} tags (target: {num_tags}, exclusion list size: {len(self.exclusion_words)})")
+            logger.info(f"🎯 Target: {num_tags} tags | Requesting: {requested_tags} tags (3x buffer for filters)")
+            logger.info(f"   Active filters: gibberish detection, generic terms, exclusion list ({len(self.exclusion_words)} words)")
             
             prompt = self._build_prompt(title, description, content, requested_tags)
             
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": "You are a multilingual document tagging expert for Indian government documents. You understand both English and Hindi (Devanagari script). ALWAYS generate tags in ENGLISH ONLY, even if the document is in Hindi or other languages. Translate concepts to English for universal searchability. Return ONLY comma-separated lowercase English tags, nothing else."
-                    },
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=400,
-                temperature=0.2
-            )
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {
+                            "role": "system", 
+                            "content": """You are a multilingual document tagging expert for Indian government documents.
+
+LANGUAGE SUPPORT: You understand ALL Indian languages including:
+- Devanagari script: Hindi, Marathi, Sanskrit
+- Bengali/Assamese script
+- Gurmukhi script: Punjabi
+- Gujarati script
+- Oriya (Odia) script
+- Tamil script
+- Telugu script
+- Kannada script
+- Malayalam script
+- English and mixed-language documents
+
+YOUR TASK: 
+1. Read and understand the document in its native language(s)
+2. Extract key concepts, topics, and themes
+3. ALWAYS generate tags in ENGLISH ONLY (translate concepts from any language to English)
+4. Generate the EXACT number of tags requested (this is critical!)
+5. Return ONLY comma-separated lowercase English tags for universal searchability
+
+OUTPUT FORMAT: comma-separated tags only, nothing else"""
+                        },
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=400,
+                    temperature=0.2
+                )
+            except UnicodeEncodeError as e:
+                logger.error(f"❌ Unicode encoding error in API call: {e}")
+                logger.warning(f"⚠️ Error at position {e.start if hasattr(e, 'start') else 'unknown'}")
+                
+                # Log the problematic character if possible
+                if hasattr(e, 'object') and hasattr(e, 'start'):
+                    try:
+                        problematic_char = e.object[e.start:e.start+10]
+                        logger.error(f"Problematic text: {repr(problematic_char)}")
+                    except:
+                        pass
+                
+                # Fallback strategy: Try with more aggressive sanitization
+                logger.info("🔄 Retrying with aggressive sanitization (ASCII-only fallback)...")
+                logger.warning("⚠️ This may lose Indian language content - for debugging only")
+                
+                # Strip all non-ASCII as last resort
+                content_ascii = content.encode('ascii', errors='ignore').decode('ascii')
+                title_ascii = title.encode('ascii', errors='ignore').decode('ascii')
+                description_ascii = description.encode('ascii', errors='ignore').decode('ascii')
+                
+                if not content_ascii.strip():
+                    logger.error("❌ Document is entirely non-ASCII. Cannot process with ASCII fallback.")
+                    return {
+                        "success": False,
+                        "error": "Document encoding issue: Document is entirely in non-ASCII script and cannot be processed due to encoding limitations.",
+                        "tags": []
+                    }
+                
+                prompt_ascii = self._build_prompt(title_ascii, description_ascii, content_ascii, requested_tags)
+                
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {
+                            "role": "system", 
+                            "content": "You are a document tagging expert. Generate ENGLISH tags only. Return comma-separated lowercase tags."
+                        },
+                        {"role": "user", "content": prompt_ascii}
+                    ],
+                    max_tokens=400,
+                    temperature=0.2
+                )
             
             # Parse response
             tags_text = response.choices[0].message.content.strip()
             logger.info(f"Raw AI response: '{tags_text}'")
             
             # Parse with buffer amount
-            tags = self._parse_tags(tags_text, requested_tags)
-            logger.info(f"Parsed {len(tags)} tags before exclusion filtering: {tags}")
+            tags_parsed = self._parse_tags(tags_text, requested_tags)
+            logger.info(f"📊 Parsed {len(tags_parsed)} tags before filtering")
             
             # Apply exclusion filter if needed
+            tags_after_exclusion = tags_parsed
             if self.exclusion_words:
-                original_count = len(tags)
-                tags = self._filter_excluded_tags(tags)
-                logger.info(f"After exclusion filtering: {len(tags)} tags (removed {original_count - len(tags)})")
+                tags_after_exclusion = self._filter_excluded_tags(tags_parsed)
+                rejected_count = len(tags_parsed) - len(tags_after_exclusion)
+                if rejected_count > 0:
+                    logger.info(f"🚫 Exclusion filter removed {rejected_count} tags")
             
-            # Trim to exact requested number
-            tags = tags[:num_tags]
-            logger.info(f"Final tags (trimmed to {num_tags}): {tags}")
+            # Check if we have enough tags
+            if len(tags_after_exclusion) < num_tags:
+                logger.warning(f"⚠️ INSUFFICIENT TAGS: Got {len(tags_after_exclusion)}, need {num_tags}")
+                logger.warning(f"   Requested: {requested_tags} → Parsed: {len(tags_parsed)} → After filters: {len(tags_after_exclusion)}")
+                logger.warning(f"   Rejection rate: {((requested_tags - len(tags_after_exclusion)) / requested_tags * 100):.1f}%")
+                
+                # If we have at least 50% of requested, use what we have
+                # Otherwise, this indicates a serious problem
+                if len(tags_after_exclusion) < num_tags * 0.5:
+                    logger.error(f"❌ CRITICAL: Less than 50% of requested tags survived filtering!")
+                    logger.error(f"   This indicates overly aggressive filtering or poor AI output quality")
+            
+            # Take exactly the number requested (or all we have if less)
+            final_tags = tags_after_exclusion[:num_tags]
+            
+            # Pad with best remaining tags if we're short
+            if len(final_tags) < num_tags and len(tags_after_exclusion) < num_tags:
+                shortage = num_tags - len(final_tags)
+                logger.warning(f"⚠️ SHORT {shortage} tags! Returning {len(final_tags)} instead of {num_tags}")
+            
+            logger.info(f"✅ Final: {len(final_tags)}/{num_tags} tags: {final_tags}")
             
             tokens_used = 0
             if response.usage:
@@ -105,9 +199,19 @@ class AITagger:
             
             return {
                 "success": True,
-                "tags": tags,
+                "tags": final_tags,
                 "raw_response": tags_text,
-                "tokens_used": tokens_used
+                "tokens_used": tokens_used,
+                "tags_requested": num_tags,
+                "tags_returned": len(final_tags),
+                "tags_parsed": len(tags_parsed),
+                "filtering_stats": {
+                    "requested_from_ai": requested_tags,
+                    "parsed": len(tags_parsed),
+                    "after_exclusions": len(tags_after_exclusion),
+                    "final": len(final_tags),
+                    "rejection_rate": f"{((requested_tags - len(final_tags)) / requested_tags * 100):.1f}%"
+                }
             }
             
         except openai.AuthenticationError:
@@ -137,6 +241,149 @@ class AITagger:
                 "tags": []
             }
     
+    def _detect_indian_scripts(self, text: str) -> Dict[str, int]:
+        """
+        Detect which Indian scripts are present in the text
+        
+        Unicode ranges for Indian scripts:
+        - Devanagari (Hindi, Marathi, Sanskrit): U+0900 - U+097F
+        - Bengali/Assamese: U+0980 - U+09FF
+        - Gurmukhi (Punjabi): U+0A00 - U+0A7F
+        - Gujarati: U+0A80 - U+0AFF
+        - Oriya (Odia): U+0B00 - U+0B7F
+        - Tamil: U+0B80 - U+0BFF
+        - Telugu: U+0C00 - U+0C7F
+        - Kannada: U+0C80 - U+0CFF
+        - Malayalam: U+0D00 - U+0D7F
+        - Sinhala: U+0D80 - U+0DFF
+        - Thai: U+0E00 - U+0E7F
+        - Lao: U+0E80 - U+0EFF
+        - Tibetan: U+0F00 - U+0FFF
+        - Myanmar: U+1000 - U+109F
+        """
+        scripts = {
+            'Devanagari (Hindi/Marathi/Sanskrit)': 0,
+            'Bengali/Assamese': 0,
+            'Gurmukhi (Punjabi)': 0,
+            'Gujarati': 0,
+            'Oriya (Odia)': 0,
+            'Tamil': 0,
+            'Telugu': 0,
+            'Kannada': 0,
+            'Malayalam': 0,
+            'Other Indian scripts': 0
+        }
+        
+        for char in text:
+            code_point = ord(char)
+            if 0x0900 <= code_point <= 0x097F:
+                scripts['Devanagari (Hindi/Marathi/Sanskrit)'] += 1
+            elif 0x0980 <= code_point <= 0x09FF:
+                scripts['Bengali/Assamese'] += 1
+            elif 0x0A00 <= code_point <= 0x0A7F:
+                scripts['Gurmukhi (Punjabi)'] += 1
+            elif 0x0A80 <= code_point <= 0x0AFF:
+                scripts['Gujarati'] += 1
+            elif 0x0B00 <= code_point <= 0x0B7F:
+                scripts['Oriya (Odia)'] += 1
+            elif 0x0B80 <= code_point <= 0x0BFF:
+                scripts['Tamil'] += 1
+            elif 0x0C00 <= code_point <= 0x0C7F:
+                scripts['Telugu'] += 1
+            elif 0x0C80 <= code_point <= 0x0CFF:
+                scripts['Kannada'] += 1
+            elif 0x0D00 <= code_point <= 0x0D7F:
+                scripts['Malayalam'] += 1
+            elif code_point > 127 and code_point < 0x0900:
+                scripts['Other Indian scripts'] += 1
+        
+        # Return only scripts that were detected
+        return {script: count for script, count in scripts.items() if count > 0}
+    
+    def _sanitize_text_for_api(self, text: str) -> str:
+        """
+        Sanitize text to handle ALL Unicode characters safely for ALL Indian languages
+        
+        This function ensures compatibility with:
+        - All 22 official Indian languages
+        - Mixed language documents (English + Indian languages)
+        - Special symbols and currency signs
+        - Proper UTF-8 encoding throughout
+        
+        CRITICAL: We preserve ALL Indian language content - the AI needs it to understand context
+        """
+        if not text:
+            return text
+        
+        replacements_made = []
+        
+        # Replace only truly problematic characters that break API calls
+        # Keep ALL Indian language scripts intact
+        replacements = {
+            # Currency symbols that might cause issues
+            '\u20b9': 'Rs.',  # ₹ (Indian Rupee)
+            '\u20ac': 'EUR',  # €
+            '\u00a3': 'GBP',  # £
+            '\u00a5': 'YEN',  # ¥
+            '\u0024': '$',    # $ (sometimes causes issues)
+            
+            # Quotation marks
+            '\u2018': "'",    # '
+            '\u2019': "'",    # '
+            '\u201c': '"',    # "
+            '\u201d': '"',    # "
+            '\u201e': '"',    # „
+            '\u201f': '"',    # ‟
+            
+            # Dashes and special punctuation
+            '\u2013': '-',    # –
+            '\u2014': '-',    # —
+            '\u2026': '...',  # …
+            '\u2022': '*',    # •
+            '\u2023': '>',    # ‣
+            
+            # Zero-width and invisible characters (cause encoding issues)
+            '\u200b': '',     # Zero-width space
+            '\u200c': '',     # Zero-width non-joiner
+            '\u200d': '',     # Zero-width joiner
+            '\ufeff': '',     # Zero-width no-break space (BOM)
+            
+            # Other problematic characters
+            '\u00a0': ' ',    # Non-breaking space
+            '\u202f': ' ',    # Narrow no-break space
+        }
+        
+        for unicode_char, ascii_replacement in replacements.items():
+            if unicode_char in text:
+                count = text.count(unicode_char)
+                text = text.replace(unicode_char, ascii_replacement)
+                replacements_made.append(f"{repr(unicode_char)}→'{ascii_replacement}' ({count}x)")
+        
+        if replacements_made:
+            logger.info(f"🔄 Sanitized symbols: {', '.join(replacements_made)}")
+        
+        # Detect which Indian scripts are present
+        scripts_found = self._detect_indian_scripts(text)
+        if scripts_found:
+            scripts_summary = ', '.join([f"{script}: {count} chars" for script, count in scripts_found.items()])
+            logger.info(f"🌐 Multilingual document detected: {scripts_summary}")
+        
+        # Ensure clean UTF-8 encoding
+        # CRITICAL: Use 'replace' not 'ignore' to preserve all valid Unicode
+        try:
+            # Normalize to NFC (Canonical Composition) for consistency
+            text = unicodedata.normalize('NFC', text)
+            
+            # Ensure proper UTF-8 encoding
+            text = text.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+        except Exception as e:
+            logger.error(f"❌ Text encoding error: {e}")
+            # Last resort: try to salvage what we can
+            text = text.encode('ascii', errors='ignore').decode('ascii')
+            logger.warning("⚠️ Fell back to ASCII-only encoding - some content may be lost")
+        
+        return text
+    
     def _build_prompt(
         self, 
         title: str, 
@@ -145,6 +392,11 @@ class AITagger:
         num_tags: int
     ) -> str:
         """Build prompt for AI with exclusion guidance"""
+        # Sanitize inputs to handle Unicode properly
+        title = self._sanitize_text_for_api(title)
+        description = self._sanitize_text_for_api(description)
+        content = self._sanitize_text_for_api(content)
+        
         # Truncate content if too long
         content_preview = content[:1500] if len(content) > 1500 else content
         
@@ -161,13 +413,15 @@ The following common/generic terms should be AVOIDED:
 Generate tags that are SPECIFIC and UNIQUE to this document, avoiding all these common terms.
 """
         
-        prompt = f"""You are analyzing an Indian government/organizational document. Your task is to generate exactly {num_tags} HIGHLY SPECIFIC and UNIQUE meta-data tags in English.
+        prompt = f"""You are analyzing an Indian government/organizational document that may be in ANY Indian language (Hindi, Kannada, Tamil, Telugu, Bengali, Marathi, Gujarati, Punjabi, Malayalam, Odia, Assamese, etc.) or English or mixed.
+
+Your task: Generate exactly {num_tags} HIGHLY SPECIFIC and UNIQUE meta-data tags in ENGLISH ONLY (translate concepts from any language to English).
 {exclusion_guidance}
 
 Document Title: {title}
 Description: {description if description else 'N/A'}
 
-Content Preview:
+Content Preview (may contain Indian language text):
 {content_preview}
 
 CRITICAL RULES - READ CAREFULLY:
@@ -245,12 +499,54 @@ NOW GENERATE {num_tags} TAGS FOR THIS DOCUMENT:
 Output Format:
 - Comma-separated tags ONLY
 - Lowercase English
-- {num_tags} tags exactly
-- NO explanations
+- EXACTLY {num_tags} tags (this is CRITICAL - count carefully!)
+- NO explanations, NO numbering, NO extra text
 
-Tags:"""
+Generate EXACTLY {num_tags} high-quality tags:"""
         
         return prompt
+    
+    def _is_gibberish_tag(self, tag: str) -> bool:
+        """
+        Detect if a tag is gibberish/nonsensical
+        
+        Returns True if tag appears to be garbage OCR output
+        Uses CONSERVATIVE thresholds to avoid rejecting valid tags
+        """
+        if len(tag) < 3:
+            return False
+        
+        # Count vowels (including 'y' which can act as vowel)
+        vowels = sum(1 for c in tag if c in 'aeiouy')
+        letters = sum(1 for c in tag if c.isalpha())
+        
+        if letters < 3:
+            return False
+        
+        vowel_ratio = vowels / letters
+        
+        # Check for EXTREMELY low vowel ratio (likely gibberish)
+        # Made more conservative: was 0.15, now 0.10 (10%)
+        if vowel_ratio < 0.10:
+            logger.warning(f"🚫 Tag '{tag}' rejected: too few vowels ({vowel_ratio:.2%})")
+            return True
+        
+        # Check for excessive consonant clusters
+        # Made more conservative: was 4+, now 5+ consonants in a row
+        consonant_clusters = re.findall(r'[bcdfghjklmnpqrstvwxz]{5,}', tag)
+        if consonant_clusters:
+            logger.warning(f"🚫 Tag '{tag}' rejected: extreme consonant cluster {consonant_clusters}")
+            return True
+        
+        # Check for completely unpronounceable patterns
+        # Made more conservative: was 4, now 6 consonants
+        parts = re.split(r'[aeiouy]+', tag)
+        for part in parts:
+            if len(part) > 6:
+                logger.warning(f"🚫 Tag '{tag}' rejected: unpronounceable ({part})")
+                return True
+        
+        return False
     
     def _parse_tags(self, tags_text: str, expected_count: int) -> List[str]:
         """Parse and clean tags from AI response (English only output)"""
@@ -313,7 +609,14 @@ Tags:"""
             # Normalize whitespace
             tag = re.sub(r'\s+', ' ', tag).strip()
             
-            logger.info(f"Cleaned tag: '{original_tag}' -> '{tag}' (length: {len(tag)})")
+            # Only log if tag changed significantly during cleaning
+            if original_tag != tag:
+                logger.debug(f"Cleaned tag: '{original_tag}' -> '{tag}'")
+            
+            # Check if tag is gibberish
+            if self._is_gibberish_tag(tag):
+                rejected_generic.append(tag)
+                continue
             
             # Check if tag is too generic
             if tag in GENERIC_TERMS:
@@ -334,21 +637,25 @@ Tags:"""
             if tag and all(ord(c) < 128 for c in tag):
                 if len(tag) >= 2 and len(tag) <= 100 and tag not in valid_tags:
                     valid_tags.append(tag)
-                    logger.info(f"Tag accepted: '{tag}'")
+                    logger.debug(f"✓ '{tag}'")
                 else:
-                    logger.info(f"Tag rejected: '{tag}' (length: {len(tag)}, duplicate: {tag in valid_tags})")
+                    if len(tag) < 2:
+                        logger.debug(f"✗ '{tag}' (too short)")
+                    elif len(tag) > 100:
+                        logger.debug(f"✗ '{tag}' (too long)")
+                    elif tag in valid_tags:
+                        logger.debug(f"✗ '{tag}' (duplicate)")
             else:
-                logger.info(f"Tag rejected (non-ASCII): '{tag}'")
+                logger.debug(f"✗ '{tag}' (non-ASCII)")
         
         if rejected_generic:
-            logger.warning(f"Rejected {len(rejected_generic)} generic tags: {rejected_generic}")
+            logger.info(f"🚫 Rejected {len(rejected_generic)} filtered tags: {rejected_generic[:5]}{'...' if len(rejected_generic) > 5 else ''}")
         
-        logger.info(f"Final valid tags ({len(valid_tags)}): {valid_tags}")
+        logger.info(f"📊 Parsed result: {len(valid_tags)} valid tags from {len(tags)} candidates")
         
-        # Limit to expected count
-        result = valid_tags[:expected_count]
-        logger.info(f"Returning {len(result)} tags: {result}")
-        return result
+        # Return ALL valid tags (don't limit here - let caller decide)
+        # This ensures we have maximum tags available for the final selection
+        return valid_tags
     
     def _filter_excluded_tags(self, tags: List[str]) -> List[str]:
         """

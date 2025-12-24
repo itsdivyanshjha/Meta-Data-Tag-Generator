@@ -18,10 +18,14 @@ try:
     import easyocr
     import numpy as np
     EASYOCR_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     EASYOCR_AVAILABLE = False
+    print(f"⚠️ EasyOCR not available: {e}")
 
 logger = logging.getLogger(__name__)
+
+# Log availability status on module load
+logger.info(f"📦 OCR Availability: Tesseract={OCR_AVAILABLE}, EasyOCR={EASYOCR_AVAILABLE}")
 
 
 class PDFExtractor:
@@ -147,12 +151,14 @@ class PDFExtractor:
                     return tesseract_result
                 
                 # If Tesseract confidence is low, try EasyOCR for better accuracy
-                logger.info(f"Tesseract confidence low ({tesseract_confidence}%). Trying EasyOCR for better accuracy...")
+                logger.info(f"🔄 Tesseract confidence low ({tesseract_confidence}% < {PDFExtractor.TESSERACT_CONFIDENCE_THRESHOLD}%). Trying EasyOCR for better accuracy...")
             else:
-                logger.warning("Tesseract OCR failed. Trying EasyOCR...")
+                logger.warning("🔄 Tesseract OCR failed. Trying EasyOCR...")
             
             # Step 5: Try EasyOCR as fallback or for better accuracy
+            logger.info(f"🔍 Checking EasyOCR availability: {EASYOCR_AVAILABLE}")
             if EASYOCR_AVAILABLE:
+                logger.info("✅ EasyOCR is available. Starting EasyOCR extraction...")
                 easyocr_result = PDFExtractor._extract_with_easyocr(pdf_bytes, num_pages)
                 
                 if easyocr_result["success"]:
@@ -196,6 +202,8 @@ class PDFExtractor:
                         if pypdf_result["title"] != "Untitled Document":
                             easyocr_result["title"] = pypdf_result["title"]
                         return easyocr_result
+            else:
+                logger.warning("❌ EasyOCR not available. Install with: pip install easyocr torch torchvision")
             
             # Fallback to Tesseract if EasyOCR not available or failed
             if tesseract_result["success"]:
@@ -361,6 +369,10 @@ class PDFExtractor:
             # Light cleaning - preserve Hindi characters
             extracted_text = PDFExtractor._clean_text_unicode_safe(extracted_text)
             
+            # Check for gibberish in OCR output
+            if PDFExtractor._is_gibberish(extracted_text):
+                logger.warning("⚠️ Detected gibberish in Tesseract OCR output. Quality may be poor.")
+            
             # Calculate overall OCR confidence
             overall_confidence = (
                 sum(confidence_scores) / len(confidence_scores) 
@@ -505,6 +517,10 @@ class PDFExtractor:
             # Clean text (preserve Unicode for Indian languages)
             extracted_text = PDFExtractor._clean_text_unicode_safe(extracted_text)
             
+            # Check for gibberish in EasyOCR output
+            if PDFExtractor._is_gibberish(extracted_text):
+                logger.warning("⚠️ Detected gibberish in EasyOCR output. Document may have very poor scan quality.")
+            
             # Extract title
             title = PDFExtractor._extract_title_from_text(extracted_text)
             
@@ -582,6 +598,53 @@ class PDFExtractor:
             text = ' '.join(words[:2500])
         
         return text.strip()
+    
+    @staticmethod
+    def _is_gibberish(text: str) -> bool:
+        """
+        Detect if extracted text is gibberish/nonsensical
+        
+        Checks for patterns indicating OCR failure:
+        1. High ratio of consonant clusters (xgy, hfd, vubf)
+        2. Repeated random character patterns
+        3. Very low vowel ratio in English text
+        4. Excessive special characters
+        """
+        if not text or len(text) < 20:
+            return False
+        
+        # Sample for analysis
+        sample = text[:1000].lower()
+        
+        # Count vowels vs consonants for English text
+        vowels = sum(1 for c in sample if c in 'aeiou')
+        letters = sum(1 for c in sample if c.isalpha())
+        
+        if letters > 50:  # Only check if we have enough letters
+            vowel_ratio = vowels / letters
+            # English text typically has 35-45% vowels
+            # If less than 20%, likely gibberish
+            if vowel_ratio < 0.20:
+                logger.warning(f"Detected gibberish: vowel ratio too low ({vowel_ratio:.2%})")
+                return True
+        
+        # Check for excessive consonant clusters (3+ consonants in a row)
+        consonant_clusters = re.findall(r'[bcdfghjklmnpqrstvwxyz]{3,}', sample)
+        if len(consonant_clusters) > 10:
+            logger.warning(f"Detected gibberish: {len(consonant_clusters)} consonant clusters: {consonant_clusters[:5]}")
+            return True
+        
+        # Check for repeated nonsense patterns
+        words = re.findall(r'\b[a-z]{3,}\b', sample)
+        if len(words) > 20:
+            # Count how many words are "pronounceable" (have vowels)
+            pronounceable = sum(1 for word in words if any(v in word for v in 'aeiou'))
+            pronounceable_ratio = pronounceable / len(words)
+            if pronounceable_ratio < 0.60:  # Less than 60% pronounceable
+                logger.warning(f"Detected gibberish: only {pronounceable_ratio:.2%} pronounceable words")
+                return True
+        
+        return False
     
     @staticmethod
     def _is_text_corrupted(text: str) -> bool:
