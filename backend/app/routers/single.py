@@ -76,7 +76,7 @@ async def process_single_pdf(
             # Validate file type
             if not pdf_file.filename.lower().endswith('.pdf'):
                 raise HTTPException(status_code=400, detail="Invalid file type. Please upload a PDF file.")
-            
+        
             pdf_bytes = await pdf_file.read()
             document_name = pdf_file.filename
             

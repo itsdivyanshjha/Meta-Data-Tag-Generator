@@ -176,7 +176,7 @@ OUTPUT FORMAT: comma-separated tags only, nothing else"""
                 logger.warning(f"⚠️ INSUFFICIENT TAGS: Got {len(tags_after_exclusion)}, need {num_tags}")
                 logger.warning(f"   Requested: {requested_tags} → Parsed: {len(tags_parsed)} → After filters: {len(tags_after_exclusion)}")
                 logger.warning(f"   Rejection rate: {((requested_tags - len(tags_after_exclusion)) / requested_tags * 100):.1f}%")
-                
+            
                 # If we have at least 50% of requested, use what we have
                 # Otherwise, this indicates a serious problem
                 if len(tags_after_exclusion) < num_tags * 0.5:

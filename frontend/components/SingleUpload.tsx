@@ -145,6 +145,23 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
     }
   }
 
+  const resetUpload = () => {
+    // Clear all PDF-related state
+    setFile(null)
+    setPdfUrl('')
+    setResult(null)
+    setError(null)
+    setUrlError(null)
+    setPreviewUrl(null)
+    setIsDragging(false)
+    
+    // Reset file input if it exists
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    if (fileInput) {
+      fileInput.value = ''
+    }
+  }
+
   const formatFileSize = (bytes: number) => {
     if (bytes < 1024) return bytes + ' B'
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
@@ -155,8 +172,34 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
     <div className="space-y-6">
       <div className="card p-6 space-y-4">
         <div className="border-b border-gray-200 pb-3">
-          <h2 className="text-lg font-bold text-gray-900">Single PDF Upload</h2>
-          <p className="text-sm text-gray-500">Upload a PDF to generate tags</p>
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-lg font-bold text-gray-900">Single PDF Upload</h2>
+              <p className="text-sm text-gray-500">Upload a PDF to generate tags</p>
+            </div>
+            <button
+              onClick={resetUpload}
+              disabled={!file && !pdfUrl && !result}
+              className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Reset PDF upload (keeps configuration)"
+            >
+              <svg 
+                xmlns="http://www.w3.org/2000/svg" 
+                className="h-4 w-4" 
+                fill="none" 
+                viewBox="0 0 24 24" 
+                stroke="currentColor"
+              >
+                <path 
+                  strokeLinecap="round" 
+                  strokeLinejoin="round" 
+                  strokeWidth={2} 
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" 
+                />
+              </svg>
+              Refresh
+            </button>
+          </div>
         </div>
 
         {/* Drop Zone - Reduced height */}
