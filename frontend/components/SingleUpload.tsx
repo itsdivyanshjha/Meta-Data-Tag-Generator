@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback } from 'react'
-import { processSinglePDF, APIError } from '@/lib/api'
+import { processSinglePDF, APIError, getPdfPreviewUrl } from '@/lib/api'
 import { TaggingConfig, SinglePDFResponse } from '@/lib/types'
 
 interface SingleUploadProps {
@@ -54,8 +54,8 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
         if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
           setUrlError('URL must start with http:// or https://')
         } else if (url) {
-          // Set preview URL directly for valid URLs
-          setPreviewUrl(url)
+          // Use proxy endpoint to bypass CORS restrictions
+          setPreviewUrl(getPdfPreviewUrl(url))
         }
       } catch (err) {
         setUrlError('Invalid URL format')

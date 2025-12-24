@@ -1,4 +1,5 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
+from fastapi.responses import Response
 from app.models import SinglePDFResponse, TaggingConfig
 from app.services.pdf_extractor import PDFExtractor
 from app.services.ai_tagger import AITagger
@@ -196,4 +197,50 @@ async def process_single_pdf(
         raise
     except Exception as e:
         logger.error(f"Error processing PDF: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.get("/preview")
+async def preview_pdf_url(
+    url: str = Query(..., description="URL of the PDF to preview")
+):
+    """
+    Proxy endpoint to fetch and serve PDF from URL for preview purposes.
+    This bypasses CORS restrictions by serving the PDF through our backend.
+    """
+    try:
+        # Validate URL format
+        if not url.startswith(('http://', 'https://')):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid URL. Must start with http:// or https://"
+            )
+        
+        # Download PDF from URL
+        from app.services.file_handler import FileHandler
+        handler = FileHandler()
+        download_result = handler.download_file("url", url)
+        
+        if not download_result["success"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to download PDF from URL: {download_result.get('error', 'Unknown error')}"
+            )
+        
+        pdf_bytes = download_result["file_bytes"]
+        
+        # Return PDF with proper headers for iframe embedding
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": "inline; filename=preview.pdf",
+                "X-Content-Type-Options": "nosniff",
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error proxying PDF for preview: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")

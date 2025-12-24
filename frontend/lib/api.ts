@@ -103,3 +103,11 @@ export function downloadCSV(dataUrl: string, filename: string = 'tagged_document
   document.body.removeChild(link);
 }
 
+/**
+ * Get preview URL for a PDF URL.
+ * Uses the proxy endpoint to bypass CORS restrictions.
+ */
+export function getPdfPreviewUrl(pdfUrl: string): string {
+  return `${API_BASE}/api/single/preview?url=${encodeURIComponent(pdfUrl)}`;
+}
+
