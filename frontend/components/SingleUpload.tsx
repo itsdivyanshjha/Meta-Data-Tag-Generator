@@ -407,7 +407,7 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
             ) : (
               <div className="p-4 bg-red-50 border border-red-200 rounded">
                 <p className="text-sm text-red-700 font-semibold mb-2">⚠️ No tags were parsed from the AI response</p>
-                <p className="text-xs text-red-600">Check the "Raw AI Response" above to see what the model returned. The parsing logic may need adjustment.</p>
+                <p className="text-xs text-red-600">Check the &quot;Raw AI Response&quot; above to see what the model returned. The parsing logic may need adjustment.</p>
               </div>
             )}
           </div>

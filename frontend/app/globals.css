@@ -47,3 +47,50 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #6b7280;
 }
+
+/* AG Grid Airtable-like styling */
+.ag-theme-alpine {
+  --ag-header-height: 42px;
+  --ag-header-foreground-color: #374151;
+  --ag-header-background-color: #f9fafb;
+  --ag-header-cell-hover-background-color: #f3f4f6;
+  --ag-row-hover-color: #f3f4f6;
+  --ag-selected-row-background-color: #dbeafe;
+  --ag-border-color: #e5e7eb;
+  --ag-odd-row-background-color: #ffffff;
+  --ag-even-row-background-color: #fafafa;
+  --ag-font-size: 13px;
+  --ag-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+.ag-theme-alpine .ag-header-cell {
+  font-weight: 500;
+  border-right: 1px solid var(--ag-border-color);
+}
+
+.ag-theme-alpine .ag-cell {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  line-height: 1.5;
+}
+
+.ag-theme-alpine .ag-row {
+  border-bottom: 1px solid var(--ag-border-color);
+}
+
+.ag-theme-alpine .ag-row-selected {
+  background-color: var(--ag-selected-row-background-color) !important;
+}
+
+.ag-theme-alpine .ag-row.ag-row-processing {
+  background-color: #eff6ff;
+}
+
+.ag-theme-alpine .ag-row.ag-row-success {
+  background-color: #f0fdf4;
+}
+
+.ag-theme-alpine .ag-row.ag-row-failed {
+  background-color: #fef2f2;
+}

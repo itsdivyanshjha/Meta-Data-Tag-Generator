@@ -51,10 +51,10 @@ export default function ConfigPanel({ config, setConfig, onExclusionFileChange }
   }
 
   return (
-    <div className="card p-6 space-y-6">
-      <h2 className="text-lg font-bold text-gray-900">Configuration</h2>
+    <div className="card p-5 h-full flex flex-col">
+      <h2 className="text-lg font-bold text-gray-900 flex-shrink-0 mb-5">Configuration</h2>
       
-      <div className="space-y-4">
+      <div className="flex-1 overflow-y-auto space-y-4">
         {/* API Key */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -180,7 +180,7 @@ export default function ConfigPanel({ config, setConfig, onExclusionFileChange }
       </div>
 
       {/* Status */}
-      <div className={`p-3 rounded text-sm ${
+      <div className={`p-3 rounded text-sm flex-shrink-0 ${
         config.api_key && config.model_name
           ? 'bg-green-50 text-green-700' 
           : 'bg-yellow-50 text-yellow-700'

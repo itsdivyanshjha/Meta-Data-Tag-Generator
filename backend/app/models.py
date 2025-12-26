@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal, Dict, Any
+from enum import Enum
 
 
 class TaggingConfig(BaseModel):
@@ -71,4 +72,73 @@ class HealthCheckResponse(BaseModel):
     """Health check response"""
     status: str
     version: str
+    message: str
+
+
+# ===== NEW BATCH PROCESSING MODELS =====
+
+class DocumentStatus(str, Enum):
+    """Status of document processing"""
+    PENDING = "pending"
+    PROCESSING = "processing"
+    SUCCESS = "success"
+    FAILED = "failed"
+
+
+class PathType(str, Enum):
+    """Type of file path"""
+    URL = "url"
+    S3 = "s3"
+    LOCAL = "local"
+
+
+class PathValidationRequest(BaseModel):
+    """Request to validate file paths"""
+    paths: List[Dict[str, str]] = Field(..., description="List of {path: string, type: string} objects")
+
+
+class PathValidationResult(BaseModel):
+    """Result of path validation"""
+    path: str
+    valid: bool
+    error: Optional[str] = None
+    content_type: Optional[str] = None
+    size: Optional[int] = None
+
+
+class PathValidationResponse(BaseModel):
+    """Response for path validation"""
+    results: List[PathValidationResult]
+    total: int
+    valid_count: int
+    invalid_count: int
+
+
+class WebSocketProgressUpdate(BaseModel):
+    """Real-time progress update sent via WebSocket"""
+    job_id: str
+    row_id: int
+    row_number: int  # 1-indexed for display
+    title: str
+    status: DocumentStatus
+    progress: float  # 0.0 to 1.0
+    tags: Optional[List[str]] = None
+    error: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class BatchStartRequest(BaseModel):
+    """Request to start batch processing via WebSocket"""
+    documents: List[Dict[str, Any]]
+    config: TaggingConfig
+    column_mapping: Dict[str, str] = Field(
+        default={},
+        description="Maps column IDs to system field names (title, file_path, file_source_type, description)"
+    )
+
+
+class BatchStartResponse(BaseModel):
+    """Response when batch processing starts"""
+    job_id: str
+    total_documents: int
     message: str

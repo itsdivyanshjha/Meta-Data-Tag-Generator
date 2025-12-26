@@ -10,6 +10,10 @@ pydantic>=2.0.0
 pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
 
+# WebSocket support
+websockets>=12.0
+aiofiles>=23.2.1
+
 # OCR Dependencies - Tesseract (fast, good for Hindi)
 pytesseract>=0.3.10
 pdf2image>=1.16.3

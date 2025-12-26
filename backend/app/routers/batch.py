@@ -1,18 +1,361 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+"""
+Batch Processing Router
+
+Provides endpoints for:
+- WebSocket-based real-time batch processing
+- Path validation before processing
+- CSV template download
+- Legacy CSV upload processing
+"""
+
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
-from app.models import BatchProcessResponse, TaggingConfig
+from app.models import (
+    BatchProcessResponse, 
+    TaggingConfig,
+    PathValidationRequest,
+    PathValidationResponse,
+    PathValidationResult,
+    BatchStartRequest,
+    BatchStartResponse,
+    DocumentStatus
+)
 from app.services.csv_processor import CSVProcessor
+from app.services.async_batch_processor import batch_processor, AsyncBatchProcessor
 from app.services.exclusion_parser import ExclusionListParser
-from typing import Optional
+from app.services.file_handler import FileHandler
+from typing import Optional, List, Dict, Any
 import time
 import json
 import base64
 import logging
+import requests
+import asyncio
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
+# ===== WEBSOCKET BATCH PROCESSING =====
+
+@router.websocket("/ws/{job_id}")
+async def batch_progress_websocket(websocket: WebSocket, job_id: str):
+    """
+    WebSocket endpoint for real-time batch processing progress
+    
+    Flow:
+    1. Client connects with a job_id
+    2. Client sends BatchStartRequest JSON
+    3. Server processes documents and sends progress updates
+    4. Server sends final completion message
+    
+    Message format (client → server):
+    {
+        "documents": [...],
+        "config": {...},
+        "column_mapping": {...}
+    }
+    
+    Message format (server → client):
+    {
+        "job_id": "...",
+        "row_id": 0,
+        "row_number": 1,
+        "title": "...",
+        "status": "processing|success|failed",
+        "progress": 0.5,
+        "tags": [...],
+        "error": null,
+        "metadata": {...}
+    }
+    """
+    await websocket.accept()
+    logger.info(f"WebSocket connected for job {job_id}")
+    
+    try:
+        # Wait for the batch start request
+        data = await websocket.receive_json()
+        
+        # Parse the request
+        documents = data.get("documents", [])
+        config_data = data.get("config", {})
+        column_mapping = data.get("column_mapping", {})
+        
+        if not documents:
+            await websocket.send_json({
+                "error": "No documents provided",
+                "job_id": job_id
+            })
+            await websocket.close()
+            return
+        
+        if not config_data.get("api_key"):
+            await websocket.send_json({
+                "error": "API key is required",
+                "job_id": job_id
+            })
+            await websocket.close()
+            return
+        
+        # Create config
+        config = TaggingConfig(**config_data)
+        
+        # Send acknowledgment
+        await websocket.send_json({
+            "type": "started",
+            "job_id": job_id,
+            "total_documents": len(documents),
+            "message": f"Starting processing of {len(documents)} documents"
+        })
+        
+        # Create and process the batch job
+        processor = AsyncBatchProcessor()
+        job = await processor.start_job(documents, config, column_mapping)
+        
+        # Override job_id to match the one from URL
+        job.job_id = job_id
+        
+        # Process the batch (this sends progress updates via websocket)
+        await processor.process_batch(job, websocket)
+        
+        # Send final completion message
+        await websocket.send_json({
+            "type": "completed",
+            "job_id": job_id,
+            "total_documents": len(documents),
+            "processed_count": job.processed_count,
+            "failed_count": job.failed_count,
+            "processing_time": round(job.end_time - job.start_time, 2) if job.end_time else 0,
+            "message": f"Completed: {job.processed_count} succeeded, {job.failed_count} failed"
+        })
+        
+        # Cleanup
+        processor.cleanup_job(job_id)
+        
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected for job {job_id}")
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in WebSocket message: {str(e)}")
+        try:
+            await websocket.send_json({
+                "error": "Invalid JSON format",
+                "job_id": job_id
+            })
+        except:
+            pass
+    except Exception as e:
+        logger.error(f"WebSocket error for job {job_id}: {str(e)}", exc_info=True)
+        try:
+            await websocket.send_json({
+                "error": str(e),
+                "job_id": job_id
+            })
+        except:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except:
+            pass
+
+
+# ===== PATH VALIDATION =====
+
+@router.post("/validate-paths", response_model=PathValidationResponse)
+async def validate_paths(request: PathValidationRequest):
+    """
+    Validate file paths before processing
+    
+    Performs quick checks to verify paths are accessible:
+    - URL: HTTP HEAD request
+    - S3: Check object exists (if configured)
+    - Local: Check file exists
+    
+    Request body:
+    {
+        "paths": [
+            {"path": "https://example.com/doc.pdf", "type": "url"},
+            {"path": "s3://bucket/key.pdf", "type": "s3"},
+            {"path": "/path/to/file.pdf", "type": "local"}
+        ]
+    }
+    """
+    results: List[PathValidationResult] = []
+    valid_count = 0
+    invalid_count = 0
+    
+    handler = FileHandler()
+    
+    for item in request.paths:
+        path = item.get("path", "").strip()
+        path_type = item.get("type", "url").lower().strip()
+        
+        result = PathValidationResult(
+            path=path,
+            valid=False,
+            error=None
+        )
+        
+        if not path:
+            result.error = "Empty path"
+            invalid_count += 1
+            results.append(result)
+            continue
+        
+        try:
+            if path_type == "url":
+                result = await _validate_url(path)
+            elif path_type == "s3":
+                result = _validate_s3(path, handler)
+            elif path_type == "local":
+                result = _validate_local(path)
+            else:
+                result.error = f"Unknown path type: {path_type}"
+            
+            if result.valid:
+                valid_count += 1
+            else:
+                invalid_count += 1
+                
+        except Exception as e:
+            result.error = str(e)
+            invalid_count += 1
+        
+        results.append(result)
+    
+    return PathValidationResponse(
+        results=results,
+        total=len(results),
+        valid_count=valid_count,
+        invalid_count=invalid_count
+    )
+
+
+async def _validate_url(url: str) -> PathValidationResult:
+    """Validate URL with HEAD request"""
+    result = PathValidationResult(path=url, valid=False)
+    
+    if not url.startswith(('http://', 'https://')):
+        result.error = "URL must start with http:// or https://"
+        return result
+    
+    try:
+        # Use HEAD request to check without downloading
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        # Run in thread pool to not block
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: requests.head(url, timeout=10, headers=headers, allow_redirects=True)
+        )
+        
+        if response.status_code == 200:
+            result.valid = True
+            result.content_type = response.headers.get('Content-Type', '')
+            
+            # Try to get file size
+            content_length = response.headers.get('Content-Length')
+            if content_length:
+                result.size = int(content_length)
+        elif response.status_code == 405:
+            # HEAD not allowed, try GET with stream
+            response = await loop.run_in_executor(
+                None,
+                lambda: requests.get(url, timeout=10, headers=headers, stream=True)
+            )
+            if response.status_code == 200:
+                result.valid = True
+                result.content_type = response.headers.get('Content-Type', '')
+            else:
+                result.error = f"HTTP {response.status_code}"
+            response.close()
+        else:
+            result.error = f"HTTP {response.status_code}"
+            
+    except requests.Timeout:
+        result.error = "Request timed out"
+    except requests.RequestException as e:
+        result.error = f"Request failed: {str(e)}"
+    except Exception as e:
+        result.error = str(e)
+    
+    return result
+
+
+def _validate_s3(path: str, handler: FileHandler) -> PathValidationResult:
+    """Validate S3 path"""
+    result = PathValidationResult(path=path, valid=False)
+    
+    # If it's actually a URL, validate as URL
+    if path.startswith('http'):
+        # Can't validate async here, so just check format
+        result.valid = True
+        result.error = None
+        return result
+    
+    if not handler.s3_client:
+        result.error = "S3 client not configured"
+        return result
+    
+    try:
+        # Parse s3://bucket/key format
+        if path.startswith('s3://'):
+            parts = path[5:].split('/', 1)
+            bucket = parts[0]
+            key = parts[1] if len(parts) > 1 else ''
+        else:
+            parts = path.split('/', 1)
+            bucket = parts[0]
+            key = parts[1] if len(parts) > 1 else ''
+        
+        if not key:
+            result.error = "Invalid S3 path format"
+            return result
+        
+        # Check if object exists
+        response = handler.s3_client.head_object(Bucket=bucket, Key=key)
+        result.valid = True
+        result.size = response.get('ContentLength')
+        result.content_type = response.get('ContentType', '')
+        
+    except handler.s3_client.exceptions.NoSuchKey:
+        result.error = "Object not found"
+    except handler.s3_client.exceptions.NoSuchBucket:
+        result.error = "Bucket not found"
+    except Exception as e:
+        result.error = f"S3 error: {str(e)}"
+    
+    return result
+
+
+def _validate_local(path: str) -> PathValidationResult:
+    """Validate local file path"""
+    from pathlib import Path
+    
+    result = PathValidationResult(path=path, valid=False)
+    
+    try:
+        file_path = Path(path)
+        
+        if not file_path.exists():
+            result.error = "File not found"
+        elif not file_path.is_file():
+            result.error = "Not a file"
+        else:
+            result.valid = True
+            result.size = file_path.stat().st_size
+            
+    except Exception as e:
+        result.error = str(e)
+    
+    return result
+
+
+# ===== LEGACY CSV PROCESSING =====
 
 @router.post("/process", response_model=BatchProcessResponse)
 async def process_batch_csv(
@@ -22,6 +365,9 @@ async def process_batch_csv(
 ):
     """
     Process batch CSV with multiple documents and optional exclusion list
+    
+    This is the legacy endpoint that processes synchronously.
+    For real-time progress, use the WebSocket endpoint instead.
     
     Args:
         csv_file: Uploaded CSV file
@@ -86,6 +432,8 @@ async def process_batch_csv(
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
+# ===== CSV TEMPLATE =====
+
 @router.get("/template")
 async def get_csv_template():
     """
@@ -106,7 +454,7 @@ async def get_csv_template():
                 {"name": "file_path", "required": True, "description": "Path or URL to the file"},
                 {"name": "publishing_date", "required": False, "description": "Publication date"},
                 {"name": "file_size", "required": False, "description": "File size"}
-            ]
+            ],
+            "note": "For real-time processing with progress updates, use the WebSocket endpoint at /api/batch/ws/{job_id}"
         }
     )
-
