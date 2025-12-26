@@ -50,14 +50,6 @@ export default function BatchUpload({ config, exclusionFile }: BatchUploadProps)
   const isProcessing = useBatchStore(state => state.isProcessing)
   const progress = useBatchStore(state => state.progress)
   
-  // Debug log
-  useEffect(() => {
-    console.log('========== BatchUpload Debug ==========')
-    console.log('documents.length:', documents.length)
-    console.log('hasData:', hasData)
-    console.log('Documents:', documents)
-    console.log('=====================================')
-  }, [documents, hasData])
   
   return (
     <div className="card h-full flex flex-col">

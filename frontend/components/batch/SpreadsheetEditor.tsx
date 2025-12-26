@@ -7,11 +7,16 @@ import {
   CellValueChangedEvent,
   SelectionChangedEvent,
   GridReadyEvent,
-  GridApi
+  GridApi,
+  ModuleRegistry,
+  AllCommunityModule
 } from 'ag-grid-community'
 import 'ag-grid-community/styles/ag-grid.css'
 import 'ag-grid-community/styles/ag-theme-alpine.css'
 import { useBatchStore, DocumentStatus } from '@/lib/batchStore'
+
+// Register AG Grid modules
+ModuleRegistry.registerModules([AllCommunityModule])
 
 // Status cell renderer
 const StatusCellRenderer = (props: any) => {
@@ -126,15 +131,6 @@ export default function SpreadsheetEditor() {
     getColumnMapping
   } = useBatchStore()
   
-  // Debug log
-  useEffect(() => {
-    console.log('========== SpreadsheetEditor Debug ==========')
-    console.log('columns.length:', columns.length)
-    console.log('documents.length:', documents.length)
-    console.log('Columns:', columns)
-    console.log('Documents sample:', documents.slice(0, 2))
-    console.log('==========================================')
-  }, [columns, documents])
   
   // Build AG Grid column definitions
   const columnDefs = useMemo((): ColDef[] => {
