@@ -28,7 +28,7 @@ export default function RootLayout({
           </div>
         </header>
 
-        <main className="w-full px-6 py-6 mb-12">
+        <main className="w-full px-8 py-6 mb-12">
           {children}
         </main>
 

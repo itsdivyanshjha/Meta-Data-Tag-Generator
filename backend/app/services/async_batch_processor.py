@@ -209,38 +209,23 @@ class AsyncBatchProcessor:
         Extract document info from row data using column mapping
         
         Args:
-            doc_data: The row data (column_id → value)
-            column_mapping: Maps column IDs to system fields
+            doc_data: The row data (system_field → value from frontend)
+            column_mapping: Not used anymore - frontend sends mapped data
             
         Returns:
             Dict with title, file_path, file_source_type, description
         """
         # Default values
         result = {
-            "title": "Untitled Document",
-            "file_path": "",
-            "file_source_type": "url",
-            "description": ""
+            "title": doc_data.get("title") or "Untitled Document",
+            "file_path": doc_data.get("file_path", "").strip(),
+            "file_source_type": doc_data.get("file_source_type", "url").strip().lower(),
+            "description": doc_data.get("description", "").strip()
         }
         
-        # If column_mapping is provided, use it
-        if column_mapping:
-            for col_id, system_field in column_mapping.items():
-                if system_field in result and col_id in doc_data:
-                    result[system_field] = str(doc_data[col_id] or "")
-        else:
-            # Fallback: try to find columns by common names
-            for key, value in doc_data.items():
-                key_lower = str(key).lower().strip()
-                
-                if key_lower in ["title", "document_title", "name", "doc_title"]:
-                    result["title"] = str(value or "")
-                elif key_lower in ["file_path", "filepath", "path", "url", "link", "pdf_link"]:
-                    result["file_path"] = str(value or "")
-                elif key_lower in ["file_source_type", "source_type", "type", "path_type"]:
-                    result["file_source_type"] = str(value or "url").lower()
-                elif key_lower in ["description", "desc", "summary"]:
-                    result["description"] = str(value or "")
+        # Validate file_path is provided
+        if not result["file_path"]:
+            raise ValueError("file_path is required")
         
         # Validate file_source_type
         if result["file_source_type"] not in ["url", "s3", "local"]:

@@ -66,8 +66,14 @@ interface BatchState {
   columns: ColumnDefinition[]
   documents: DocumentRow[]
   
+  // Column mapping (system field -> column ID)
+  columnMapping: Record<string, string>
+  setColumnMapping: (mapping: Record<string, string>) => void
+  
   // Export config
   exportPresets: ExportPreset[]
+  selectedExportColumns: string[]  // Column IDs to include in export
+  setSelectedExportColumns: (columnIds: string[]) => void
   
   // Processing
   jobId: string | null
@@ -139,7 +145,9 @@ export const useBatchStore = create<BatchState>((set, get) => ({
   // Initial state
   columns: [],
   documents: [],
+  columnMapping: {},
   exportPresets: [],
+  selectedExportColumns: [],
   jobId: null,
   isProcessing: false,
   progress: 0,
@@ -147,6 +155,11 @@ export const useBatchStore = create<BatchState>((set, get) => ({
   websocket: null,
   validationResults: {},
   isValidating: false,
+  
+  // Column mapping actions
+  setColumnMapping: (mapping) => set({ columnMapping: mapping }),
+  
+  setSelectedExportColumns: (columnIds) => set({ selectedExportColumns: columnIds }),
   
   // ===== COLUMN ACTIONS =====
   
@@ -342,9 +355,28 @@ export const useBatchStore = create<BatchState>((set, get) => ({
             status: 'pending' as DocumentStatus
           }))
           
+          // Auto-detect column mapping
+          const autoMapping: Record<string, string> = {}
+          for (const col of columns) {
+            const lowerName = col.name.toLowerCase().trim()
+            
+            if (lowerName === 'title' || lowerName === 'document_title' || lowerName === 'doc_title' || lowerName === 'name') {
+              autoMapping['title'] = col.id
+            } else if (lowerName === 'file_path' || lowerName === 'filepath' || lowerName === 'path' || lowerName === 'url' || lowerName === 'pdf_link' || lowerName === 'link' || lowerName === 'pdf_url' || lowerName === 'document_url') {
+              autoMapping['file_path'] = col.id
+            } else if (lowerName === 'description' || lowerName === 'desc' || lowerName === 'summary') {
+              autoMapping['description'] = col.id
+            }
+          }
+          
+          // Initialize selectedExportColumns with all column IDs
+          const selectedExportColumns = columns.map(c => c.id)
+          
           set({
             columns,
             documents,
+            columnMapping: autoMapping,
+            selectedExportColumns,
             progress: 0,
             isProcessing: false,
             validationResults: {}
@@ -362,25 +394,16 @@ export const useBatchStore = create<BatchState>((set, get) => ({
   // ===== COLUMN MAPPING =====
   
   getColumnMapping: () => {
-    const { columns } = get()
-    const mapping: Record<string, string> = {}
-    
-    // Map column IDs to system field names based on column names
-    for (const col of columns) {
-      const lowerName = col.name.toLowerCase().trim()
-      
-      if (lowerName === 'title' || lowerName === 'document_title' || lowerName === 'doc_title') {
-        mapping[col.id] = 'title'
-      } else if (lowerName === 'file_path' || lowerName === 'filepath' || lowerName === 'path' || lowerName === 'url' || lowerName === 'pdf_link' || lowerName === 'link') {
-        mapping[col.id] = 'file_path'
-      } else if (lowerName === 'file_source_type' || lowerName === 'source_type' || lowerName === 'type' || lowerName === 'path_type') {
-        mapping[col.id] = 'file_source_type'
-      } else if (lowerName === 'description' || lowerName === 'desc' || lowerName === 'summary') {
-        mapping[col.id] = 'description'
+    const { columnMapping } = get()
+    // Return the user-configured mapping (system field -> column ID)
+    // We need to invert it for processing (column ID -> system field)
+    const inverted: Record<string, string> = {}
+    for (const [systemField, columnId] of Object.entries(columnMapping)) {
+      if (columnId) {
+        inverted[columnId] = systemField
       }
     }
-    
-    return mapping
+    return inverted
   },
   
   // ===== PROCESSING =====
@@ -392,7 +415,7 @@ export const useBatchStore = create<BatchState>((set, get) => ({
   },
   
   startProcessing: async () => {
-    const { documents, columns, processingSettings, getColumnMapping } = get()
+    const { documents, columns, processingSettings, columnMapping: userColumnMapping } = get()
     
     if (!processingSettings.apiKey) {
       throw new Error('API key is required')
@@ -400,6 +423,11 @@ export const useBatchStore = create<BatchState>((set, get) => ({
     
     if (documents.length === 0) {
       throw new Error('No documents to process')
+    }
+    
+    // Validate that file_path is mapped
+    if (!userColumnMapping['file_path']) {
+      throw new Error('Please map the "PDF File Path/URL" column before processing')
     }
     
     const jobId = uuidv4()
@@ -415,17 +443,34 @@ export const useBatchStore = create<BatchState>((set, get) => ({
       }))
     }))
     
-    // Prepare documents data with column names
+    // Prepare documents data using the column mapping
     const documentsData = documents.map(doc => {
-      const rowData: Record<string, any> = {}
-      columns.forEach(col => {
-        rowData[col.name] = doc.data[col.id]
-      })
+      const rowData: Record<string, any> = {
+        id: doc.id,
+        row_number: doc.rowNumber
+      }
+      
+      // Map user columns to system fields
+      for (const [systemField, columnId] of Object.entries(userColumnMapping)) {
+        if (columnId && doc.data[columnId] !== undefined) {
+          rowData[systemField] = doc.data[columnId]
+        }
+      }
+      
+      // If no file_source_type is mapped, try to auto-detect from file_path
+      if (!rowData['file_source_type'] && rowData['file_path']) {
+        const path = rowData['file_path'].toLowerCase()
+        if (path.startsWith('http://') || path.startsWith('https://')) {
+          rowData['file_source_type'] = 'url'
+        } else if (path.startsWith('s3://')) {
+          rowData['file_source_type'] = 's3'
+        } else {
+          rowData['file_source_type'] = 'local'
+        }
+      }
+      
       return rowData
     })
-    
-    // Get column mapping
-    const columnMapping = getColumnMapping()
     
     // Determine WebSocket URL
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -450,8 +495,7 @@ export const useBatchStore = create<BatchState>((set, get) => ({
             num_pages: processingSettings.numPages,
             num_tags: processingSettings.numTags,
             exclusion_words: processingSettings.exclusionWords
-          },
-          column_mapping: columnMapping
+          }
         }))
       }
       

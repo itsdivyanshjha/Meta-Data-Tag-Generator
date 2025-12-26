@@ -7,6 +7,7 @@ import { useBatchStore } from '@/lib/batchStore'
 import FileUploader from '@/components/batch/FileUploader'
 import ProcessingControls from '@/components/batch/ProcessingControls'
 import ExportPanel from '@/components/batch/ExportPanel'
+import ColumnMappingPanel from '@/components/batch/ColumnMappingPanel'
 
 // Dynamically import SpreadsheetEditor to avoid SSR issues with AG Grid
 const SpreadsheetEditor = dynamic(
@@ -71,9 +72,12 @@ export default function BatchUpload({ config, exclusionFile }: BatchUploadProps)
         {/* Spreadsheet Editor Section */}
         {hasData && (
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
-            {/* Processing Controls - Fixed at top */}
+            {/* Column Mapping & Processing Controls - Fixed at top */}
             <div className="px-6 py-4 border-b border-gray-200 bg-gray-50" style={{ flexShrink: 0 }}>
-              <ProcessingControls />
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+                <ColumnMappingPanel />
+                <ProcessingControls />
+              </div>
             </div>
             
             {/* Spreadsheet - Takes remaining space */}

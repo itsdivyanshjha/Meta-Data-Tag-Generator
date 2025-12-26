@@ -45,9 +45,9 @@ export default function Home() {
 
       {/* Main Content */}
       {mode === 'batch' ? (
-        <div className="flex gap-4" style={{ height: 'calc(100vh - 200px)', minHeight: '600px' }}>
+        <div className="flex gap-6" style={{ height: 'calc(100vh - 200px)', minHeight: '600px' }}>
           {/* Configuration Panel - Fixed width, closer to left */}
-          <div className="w-80 flex-shrink-0">
+          <div className="w-80 flex-shrink-0" style={{ maxWidth: '320px' }}>
             <ConfigPanel 
               config={config} 
               setConfig={setConfig}
