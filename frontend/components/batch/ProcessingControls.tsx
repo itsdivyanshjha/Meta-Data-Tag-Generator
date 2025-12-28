@@ -125,7 +125,7 @@ export default function ProcessingControls() {
               }
             `}
           >
-            🚀 Start Processing ({documents.length} documents)
+            Start Processing ({documents.length} documents)
           </button>
         ) : (
           <button

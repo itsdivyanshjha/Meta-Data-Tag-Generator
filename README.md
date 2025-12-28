@@ -39,10 +39,16 @@ Document metadata tagging system using AI and OCR.
 
 ## Backend API Endpoints
 
-Base URL: `http://localhost:8000` (development)
+Base URL: `http://localhost:8000` (development)  
+All endpoints are prefixed with `/api` except the root endpoint.
 
-### GET `/`
-Returns API information.
+---
+
+### 1. GET `/`
+**Purpose:** Root endpoint to verify API availability and version.
+
+**Where it's used:** Not directly used by frontend, but useful for API testing and health checks.
+
 **Response:**
 ```json
 {
@@ -51,8 +57,15 @@ Returns API information.
 }
 ```
 
-### POST `/api/single/process`
-Processes a single PDF file and generates tags with optional exclusion list filtering.
+---
+
+### 2. POST `/api/single/process`
+**Purpose:** Processes a single PDF file and generates AI-powered metadata tags. Supports both file uploads and URL-based document retrieval.
+
+**Where it's used:** 
+- Frontend Component: `frontend/components/SingleUpload.tsx`
+- Frontend API Client: `frontend/lib/api.ts` → `processSinglePDF()`
+- Use Case: Single document processing on the main page (`/`)
 
 **Request:**
 - Content-Type: `multipart/form-data`
@@ -60,7 +73,7 @@ Processes a single PDF file and generates tags with optional exclusion list filt
   - `pdf_file`: PDF file (File, optional - required if `pdf_url` not provided)
   - `pdf_url`: URL to PDF file (String, optional - required if `pdf_file` not provided)
     - Supports any publicly accessible HTTP/HTTPS URL
-    - Examples: CloudFront URLs, S3 URLs, direct file links
+    - Examples: CloudFront URLs, S3 URLs, direct file links, government portals
   - `config`: JSON string with `TaggingConfig` (required)
     ```json
     {
@@ -88,15 +101,43 @@ Processes a single PDF file and generates tags with optional exclusion list filt
   "extracted_text_preview": "string",
   "processing_time": 0.0,
   "is_scanned": false,
-  "extraction_method": "pypdf2" | "tesseract_ocr",
+  "extraction_method": "pypdf2" | "tesseract_ocr" | "easyocr",
   "ocr_confidence": 0.0,
   "raw_ai_response": "string",
   "error": null
 }
 ```
 
-### POST `/api/batch/process`
-Processes a CSV file containing multiple documents with optional exclusion list filtering.
+**Backend Implementation:** `backend/app/routers/single.py`
+
+---
+
+### 3. GET `/api/single/preview`
+**Purpose:** Proxy endpoint to fetch and serve PDF files from URLs, bypassing CORS restrictions for frontend preview functionality.
+
+**Where it's used:**
+- Frontend Component: `frontend/components/SingleUpload.tsx` (PDF preview iframe)
+- Frontend API Client: `frontend/lib/api.ts` → `getPdfPreviewUrl()`
+- Use Case: Enables PDF preview in browser when processing documents via URL
+
+**Request:**
+- Query Parameters:
+  - `url`: URL of the PDF to preview (required, must be HTTP/HTTPS)
+
+**Response:**
+- Content-Type: `application/pdf`
+- Returns: PDF file bytes with appropriate headers for iframe embedding
+
+**Backend Implementation:** `backend/app/routers/single.py`
+
+---
+
+### 4. POST `/api/batch/process`
+**Purpose:** Legacy synchronous batch processing endpoint. Processes a CSV file containing multiple documents and returns results after completion. **Note:** This is the legacy endpoint. For real-time progress updates, use the WebSocket endpoint instead.
+
+**Where it's used:**
+- Frontend API Client: `frontend/lib/api.ts` → `processBatchCSV()`
+- Use Case: Simple batch processing without real-time updates (currently not actively used in favor of WebSocket endpoint)
 
 **Request:**
 - Content-Type: `multipart/form-data`
@@ -114,9 +155,6 @@ Processes a CSV file containing multiple documents with optional exclusion list 
     ```
   - `exclusion_file`: Exclusion list file (File, optional)
     - Supported formats: `.txt`, `.pdf`
-    - Contains words/phrases to exclude from generated tags
-    - Format: One term per line or comma-separated
-    - Comments: Lines starting with `#` are ignored
 
 **CSV Format:**
 - Required columns: `title`, `file_source_type`, `file_path`
@@ -131,33 +169,217 @@ Processes a CSV file containing multiple documents with optional exclusion list 
   "processed_count": 0,
   "failed_count": 0,
   "output_csv_url": "string",
-  "summary": {
+  "summary_report": {
     "documents": [...],
     "errors": [...]
-  }
+  },
+  "processing_time": 0.0
 }
 ```
 
-### GET `/api/batch/template`
-Returns CSV template and column descriptions.
+**Backend Implementation:** `backend/app/routers/batch.py`
+
+---
+
+### 5. WebSocket `/api/batch/ws/{job_id}`
+**Purpose:** Real-time batch processing via WebSocket connection. Provides live progress updates as documents are processed, enabling interactive UI feedback.
+
+**Where it's used:**
+- Frontend Store: `frontend/lib/batchStore.ts` → `startProcessing()`
+- Frontend Component: `frontend/components/batch/ProcessingControls.tsx`
+- Use Case: Batch processing page (`/batch`) with real-time progress tracking
+
+**Connection Flow:**
+1. Client connects to WebSocket with a unique `job_id` in the URL
+2. Client sends batch start request:
+```json
+{
+  "documents": [
+    {
+      "title": "Document 1",
+      "file_path": "https://example.com/doc.pdf",
+      "file_source_type": "url",
+      "description": "...",
+      ...
+    }
+  ],
+  "config": {
+    "api_key": "...",
+    "model_name": "...",
+    "num_pages": 3,
+    "num_tags": 8,
+    "exclusion_words": [...]
+  },
+  "column_mapping": {
+    "title": "column_1",
+    "file_path": "column_2",
+    ...
+  }
+}
+```
+3. Server sends progress updates for each document:
+```json
+{
+  "job_id": "...",
+  "row_id": "uuid",
+  "row_number": 1,
+  "title": "Document 1",
+  "status": "processing" | "success" | "failed",
+  "progress": 0.5,
+  "tags": ["tag1", "tag2"],
+  "error": null,
+  "metadata": {
+    "extraction_method": "pypdf2",
+    "is_scanned": false,
+    ...
+  }
+}
+```
+4. Server sends completion message:
+```json
+{
+  "type": "completed",
+  "job_id": "...",
+  "total_documents": 10,
+  "processed_count": 9,
+  "failed_count": 1,
+  "processing_time": 45.2,
+  "message": "Completed: 9 succeeded, 1 failed"
+}
+```
+
+**Message Types:**
+- `started`: Job initialization confirmation
+- `progress`: Individual document processing update
+- `completed`: Batch processing finished
+- `error`: Error occurred during processing
+
+**Backend Implementation:** `backend/app/routers/batch.py` → `batch_progress_websocket()`
+
+---
+
+### 6. POST `/api/batch/validate-paths`
+**Purpose:** Pre-flight validation endpoint that checks file paths before batch processing. Validates accessibility of URLs, S3 objects, and local files to catch errors early.
+
+**Where it's used:**
+- Frontend Store: `frontend/lib/batchStore.ts` → `validatePaths()`
+- Frontend Component: `frontend/components/batch/ProcessingControls.tsx` (Pre-flight Check section)
+- Use Case: Batch processing page - validates all file paths before starting processing
+
+**Request:**
+- Content-Type: `application/json`
+- Body:
+```json
+{
+  "paths": [
+    {
+      "path": "https://example.com/doc.pdf",
+      "type": "url"
+    },
+    {
+      "path": "s3://bucket/key.pdf",
+      "type": "s3"
+    },
+    {
+      "path": "/path/to/file.pdf",
+      "type": "local"
+    }
+  ]
+}
+```
 
 **Response:**
 ```json
 {
-  "template": "CSV string",
+  "results": [
+    {
+      "path": "https://example.com/doc.pdf",
+      "valid": true,
+      "error": null,
+      "content_type": "application/pdf",
+      "size": 1024000
+    },
+    {
+      "path": "s3://bucket/missing.pdf",
+      "valid": false,
+      "error": "Object not found",
+      "content_type": null,
+      "size": null
+    }
+  ],
+  "total": 2,
+  "valid_count": 1,
+  "invalid_count": 1
+}
+```
+
+**Validation Methods:**
+- **URL**: HTTP HEAD request (falls back to GET if HEAD not allowed)
+- **S3**: AWS SDK `head_object()` check (if S3 configured)
+- **Local**: File system existence check
+
+**Backend Implementation:** `backend/app/routers/batch.py` → `validate_paths()`
+
+---
+
+### 7. GET `/api/batch/template`
+**Purpose:** Returns a CSV template with sample data and column descriptions for batch processing. Helps users understand the required CSV format.
+
+**Where it's used:**
+- Frontend API Client: `frontend/lib/api.ts` → `getCSVTemplate()`
+- Frontend Component: `frontend/components/batch/FileUploader.tsx` (template download feature)
+- Use Case: Batch processing page - provides downloadable CSV template
+
+**Response:**
+```json
+{
+  "template": "title,description,file_source_type,file_path,publishing_date,file_size\n\"Training Manual\",\"PMSPECIAL training document\",url,https://example.com/doc1.pdf,2025-01-15,1.2MB\n...",
   "columns": [
     {
       "name": "title",
       "required": true,
       "description": "Document title"
     },
-    ...
-  ]
+    {
+      "name": "description",
+      "required": false,
+      "description": "Document description"
+    },
+    {
+      "name": "file_source_type",
+      "required": true,
+      "description": "Source type: url, s3, or local"
+    },
+    {
+      "name": "file_path",
+      "required": true,
+      "description": "Path or URL to the file"
+    },
+    {
+      "name": "publishing_date",
+      "required": false,
+      "description": "Publication date"
+    },
+    {
+      "name": "file_size",
+      "required": false,
+      "description": "File size"
+    }
+  ],
+  "note": "For real-time processing with progress updates, use the WebSocket endpoint at /api/batch/ws/{job_id}"
 }
 ```
 
-### GET `/api/health`
-Health check endpoint.
+**Backend Implementation:** `backend/app/routers/batch.py`
+
+---
+
+### 8. GET `/api/health`
+**Purpose:** Comprehensive health check endpoint for monitoring and deployment verification.
+
+**Where it's used:**
+- Frontend API Client: `frontend/lib/api.ts` → `checkHealth()`
+- Use Case: Health monitoring, deployment checks, API status verification
 
 **Response:**
 ```json
@@ -168,8 +390,14 @@ Health check endpoint.
 }
 ```
 
-### GET `/api/status`
-Simple status check.
+**Backend Implementation:** `backend/app/routers/status.py`
+
+---
+
+### 9. GET `/api/status`
+**Purpose:** Simple status check endpoint for quick API availability verification.
+
+**Where it's used:** Not directly used by frontend, but useful for basic health checks.
 
 **Response:**
 ```json
@@ -178,6 +406,25 @@ Simple status check.
   "service": "document-meta-tagging-api"
 }
 ```
+
+**Backend Implementation:** `backend/app/routers/status.py`
+
+---
+
+## API Usage Summary by Frontend Page
+
+### Main Page (`/`) - Single Document Processing
+- **POST `/api/single/process`**: Process single PDF (file upload or URL)
+- **GET `/api/single/preview`**: Preview PDF from URL
+
+### Batch Processing Page (`/batch`) - Multiple Document Processing
+- **WebSocket `/api/batch/ws/{job_id}`**: Real-time batch processing with live updates
+- **POST `/api/batch/validate-paths`**: Pre-flight path validation
+- **GET `/api/batch/template`**: Download CSV template
+- **POST `/api/batch/process`**: Legacy synchronous batch processing (fallback)
+
+### Global
+- **GET `/api/health`**: Health check for monitoring
 
 ## Features
 
