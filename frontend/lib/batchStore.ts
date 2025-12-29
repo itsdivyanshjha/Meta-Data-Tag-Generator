@@ -67,8 +67,8 @@ interface BatchState {
   documents: DocumentRow[]
   
   // Column mapping (system field -> column ID)
-  columnMapping: Record<string, string>
-  setColumnMapping: (mapping: Record<string, string>) => void
+  columnMapping: Record<string, string | undefined>
+  setColumnMapping: (mapping: Record<string, string | undefined>) => void
   
   // Export config
   exportPresets: ExportPreset[]
@@ -122,7 +122,7 @@ interface BatchState {
   saveExportPreset: (preset: Omit<ExportPreset, 'id'>) => void
   deleteExportPreset: (presetId: string) => void
   exportData: (preset: ExportPreset) => void
-  exportAsCSV: () => string
+  exportAsCSV: (selectedColumnIds?: string[], filteredDocuments?: any[]) => string
   
   // Reset
   reset: () => void
@@ -522,13 +522,27 @@ export const useBatchStore = create<BatchState>((set, get) => ({
   },
   
   stopProcessing: () => {
-    const { websocket } = get()
+    const { websocket, jobId } = get()
+    
+    console.log('Stopping processing...', { websocket: !!websocket, jobId })
     
     if (websocket) {
-      websocket.close()
+      // Close WebSocket with explicit close code to signal cancellation
+      try {
+        websocket.close(1000, 'User requested cancellation')
+      } catch (e) {
+        console.error('Error closing WebSocket:', e)
+      }
     }
     
+    // Immediately update state to reflect stopping
     set({ isProcessing: false, websocket: null })
+    
+    // Also try to cancel on backend via API if jobId exists
+    if (jobId) {
+      console.log('Job ID exists, attempting backend cancellation for', jobId)
+      // Note: The WebSocket close should be enough, but we log for debugging
+    }
   },
   
   updateProgress: (update) => {
@@ -702,18 +716,27 @@ export const useBatchStore = create<BatchState>((set, get) => ({
     link.click()
   },
   
-  exportAsCSV: () => {
+  exportAsCSV: (selectedColumnIds?: string[], filteredDocuments?: any[]) => {
     const { columns, documents } = get()
     
-    // Build export data with all columns + tags
-    const exportRows = documents.map(doc => {
+    // Use filtered documents if provided, otherwise use all
+    const docsToExport = filteredDocuments || documents
+    
+    // Determine which columns to export
+    const columnsToExport = selectedColumnIds && selectedColumnIds.length > 0
+      ? columns.filter(col => selectedColumnIds.includes(col.id))
+      : columns  // Export all if none specified
+    
+    // Build export data with selected columns + tags
+    const exportRows = docsToExport.map(doc => {
       const row: Record<string, any> = {}
       
-      for (const col of columns) {
+      // Add selected columns
+      for (const col of columnsToExport) {
         row[col.name] = doc.data[col.id] || ''
       }
       
-      // Add tags and status
+      // Always add tags and status
       row['Generated Tags'] = doc.tags?.join(', ') || ''
       row['Processing Status'] = doc.status
       row['Error'] = doc.error || ''

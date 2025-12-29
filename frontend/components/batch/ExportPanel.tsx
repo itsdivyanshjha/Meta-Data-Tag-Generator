@@ -16,42 +16,25 @@ export default function ExportPanel() {
     if (columns.length > 0 && selectedColumns.length === 0) {
       setSelectedColumns(columns.map(col => col.id))
     }
-  }, [columns])
+  }, [columns, selectedColumns.length])
   
   // Calculate stats
   const successCount = documents.filter(d => d.status === 'success').length
   const hasProcessedDocs = documents.some(d => d.status === 'success' || d.status === 'failed')
   
   const handleExport = () => {
-    const csv = exportAsCSV()
+    // Use selectedColumns if any are selected, otherwise export all
+    const columnsToExport = selectedColumns.length > 0 ? selectedColumns : undefined
     
-    // Filter rows if needed
-    let csvData = csv
-    if (includeOnlySuccess) {
-      // Re-export with only successful rows
-      const lines = csv.split('\n')
-      const header = lines[0]
-      const dataLines = lines.slice(1).filter(line => {
-        // Check if status column contains 'success'
-        return line.includes(',success,') || line.includes('"success"')
-      })
-      csvData = [header, ...dataLines].join('\n')
-    }
+    // Filter documents if needed
+    const docsToExport = includeOnlySuccess 
+      ? documents.filter(d => d.status === 'success')
+      : undefined  // undefined means export all
+    
+    // Export with selected columns and filtered documents
+    const csv = exportAsCSV(columnsToExport, docsToExport)
     
     // Download
-    const blob = new Blob([csvData], { type: 'text/csv;charset=utf-8;' })
-    const link = document.createElement('a')
-    link.href = URL.createObjectURL(blob)
-    link.download = `tagged_documents_${new Date().toISOString().split('T')[0]}.csv`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    
-    setIsOpen(false)
-  }
-  
-  const handleQuickExport = () => {
-    const csv = exportAsCSV()
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
     const link = document.createElement('a')
     link.href = URL.createObjectURL(blob)
@@ -59,6 +42,21 @@ export default function ExportPanel() {
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
+    URL.revokeObjectURL(link.href)
+    
+    setIsOpen(false)
+  }
+  
+  const handleQuickExport = () => {
+    const csv = exportAsCSV() // Export all columns
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = `tagged_documents_${new Date().toISOString().split('T')[0]}.csv`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(link.href)
   }
   
   if (documents.length === 0 || !hasProcessedDocs) {

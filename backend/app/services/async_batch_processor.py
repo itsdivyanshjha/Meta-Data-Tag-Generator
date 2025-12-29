@@ -129,33 +129,49 @@ class AsyncBatchProcessor:
                     return job
                 
                 # Check if WebSocket is still connected before processing
+                websocket_closed = False
                 try:
                     state = websocket.client_state
                     state_name = state.name if hasattr(state, 'name') else str(state)
                     if state_name != "CONNECTED":
-                        logger.info(f"WebSocket disconnected for job {job.job_id}. Cancelling job.")
-                        job.cancelled = True
-                        job.status = "cancelled"
-                        job.end_time = time.time()
-                        return job
-                except (AttributeError, TypeError):
+                        logger.info(f"WebSocket disconnected for job {job.job_id} (state: {state_name}). Cancelling job.")
+                        websocket_closed = True
+                except (AttributeError, TypeError, Exception) as e:
                     # If we can't check state, try to detect disconnect during send
-                    pass
+                    logger.debug(f"Could not check WebSocket state: {e}")
+                
+                if websocket_closed:
+                    job.cancelled = True
+                    job.status = "cancelled"
+                    job.end_time = time.time()
+                    return job
                 
                 try:
                     # Extract document info using column mapping
                     doc_info = self._extract_document_info(doc_data, job.column_mapping)
                     
-                    # Send "processing" update (will fail silently if WebSocket closed)
-                    await self._send_update(
-                        websocket,
-                        job_id=job.job_id,
-                        row_id=idx,
-                        row_number=idx + 1,
-                        title=doc_info.get("title", f"Document {idx + 1}"),
-                        status=DocumentStatus.PROCESSING,
-                        progress=idx / total
-                    )
+                    # Send "processing" update (will fail and set cancelled if WebSocket closed)
+                    try:
+                        await self._send_update(
+                            websocket,
+                            job_id=job.job_id,
+                            row_id=idx,
+                            row_number=idx + 1,
+                            title=doc_info.get("title", f"Document {idx + 1}"),
+                            status=DocumentStatus.PROCESSING,
+                            progress=idx / total
+                        )
+                    except Exception as send_error:
+                        # If send fails, check if it's a disconnect
+                        error_msg = str(send_error).lower()
+                        if "close" in error_msg or "disconnect" in error_msg or "send" in error_msg:
+                            logger.info(f"WebSocket send failed for job {job.job_id}. Cancelling job.")
+                            job.cancelled = True
+                            job.status = "cancelled"
+                            job.end_time = time.time()
+                            return job
+                        # Re-raise if it's a different error
+                        raise
                     
                     # CHECK AGAIN AFTER SEND UPDATE (in case it detected disconnect)
                     if job.cancelled:
@@ -415,41 +431,47 @@ class AsyncBatchProcessor:
         error: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ):
-        """Send progress update via WebSocket"""
+        """Send progress update via WebSocket. Raises exception if connection closed."""
+        # Check WebSocket connection state (handle both enum and string states)
         try:
-            # Check WebSocket connection state (handle both enum and string states)
-            try:
-                state = websocket.client_state
-                state_name = state.name if hasattr(state, 'name') else str(state)
-                if state_name != "CONNECTED":
-                    logger.debug(f"WebSocket for job {job_id} is not connected (state: {state_name}). Skipping update.")
-                    return
-            except (AttributeError, TypeError):
-                # Fallback: Try to send anyway, exception handling below will catch it
-                pass
-            
-            update = WebSocketProgressUpdate(
-                job_id=job_id,
-                row_id=row_id,
-                row_number=row_number,
-                title=title,
-                status=status,
-                progress=progress,
-                tags=tags,
-                error=error,
-                metadata=metadata
-            )
-            
+            state = websocket.client_state
+            state_name = state.name if hasattr(state, 'name') else str(state)
+            if state_name != "CONNECTED":
+                logger.info(f"WebSocket for job {job_id} is not connected (state: {state_name}). Marking as cancelled.")
+                # Mark job as cancelled if it exists
+                if job_id in self.active_jobs:
+                    self.active_jobs[job_id].cancelled = True
+                raise ConnectionError(f"WebSocket not connected (state: {state_name})")
+        except (AttributeError, TypeError):
+            # Fallback: Try to send anyway, exception handling below will catch it
+            pass
+        
+        update = WebSocketProgressUpdate(
+            job_id=job_id,
+            row_id=row_id,
+            row_number=row_number,
+            title=title,
+            status=status,
+            progress=progress,
+            tags=tags,
+            error=error,
+            metadata=metadata
+        )
+        
+        try:
             await websocket.send_json(update.model_dump())
-            
         except Exception as e:
-            # Only log if it's not a connection closed error (expected when client disconnects)
+            # Mark job as cancelled if connection closed
             error_msg = str(e).lower()
-            if "close" not in error_msg and "disconnect" not in error_msg and "send" not in error_msg:
-                logger.error(f"Error sending WebSocket update for job {job_id}: {str(e)}")
+            if "close" in error_msg or "disconnect" in error_msg or "send" in error_msg:
+                logger.info(f"WebSocket send failed for job {job_id} (connection closed). Marking as cancelled.")
+                # Mark job as cancelled
+                if job_id in self.active_jobs:
+                    self.active_jobs[job_id].cancelled = True
+                raise  # Re-raise so caller knows to stop
             else:
-                # Connection closed errors are expected when client disconnects - log at debug level
-                logger.debug(f"WebSocket send failed for job {job_id} (likely connection closed): {str(e)}")
+                logger.error(f"Error sending WebSocket update for job {job_id}: {str(e)}")
+                raise  # Re-raise non-connection errors
     
     def get_job(self, job_id: str) -> Optional[BatchJob]:
         """Get a job by ID"""
