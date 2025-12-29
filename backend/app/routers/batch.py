@@ -370,15 +370,17 @@ def _validate_local(path: str) -> PathValidationResult:
         file_path = Path(path)
         
         if not file_path.exists():
-            result.error = "File not found"
+            result.error = f"File not found: {path}. Ensure the file exists on the backend server's filesystem. If running locally, use absolute paths. If running in Docker, ensure volumes are mounted correctly."
         elif not file_path.is_file():
             result.error = "Not a file"
+        elif not file_path.is_absolute():
+            result.error = "Relative paths not supported. Please use absolute paths from the backend server's perspective."
         else:
             result.valid = True
             result.size = file_path.stat().st_size
             
     except Exception as e:
-        result.error = str(e)
+        result.error = f"Path validation error: {str(e)}"
     
     return result
 
