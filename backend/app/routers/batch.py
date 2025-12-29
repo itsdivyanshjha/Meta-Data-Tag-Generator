@@ -119,22 +119,44 @@ async def batch_progress_websocket(websocket: WebSocket, job_id: str):
         # Process the batch (this sends progress updates via websocket)
         await processor.process_batch(job, websocket)
         
-        # Send final completion message
-        await websocket.send_json({
-            "type": "completed",
-            "job_id": job_id,
-            "total_documents": len(documents),
-            "processed_count": job.processed_count,
-            "failed_count": job.failed_count,
-            "processing_time": round(job.end_time - job.start_time, 2) if job.end_time else 0,
-            "message": f"Completed: {job.processed_count} succeeded, {job.failed_count} failed"
-        })
+        # Check if job was cancelled
+        if job.cancelled:
+            logger.info(f"Job {job_id} was cancelled. Skipping final message.")
+            # Try to send cancellation message if WebSocket still open
+            try:
+                await websocket.send_json({
+                    "type": "cancelled",
+                    "job_id": job_id,
+                    "processed_count": job.processed_count,
+                    "failed_count": job.failed_count,
+                    "message": f"Processing cancelled: {job.processed_count} documents processed before cancellation"
+                })
+            except:
+                pass
+        else:
+            # Send final completion message
+            try:
+                await websocket.send_json({
+                    "type": "completed",
+                    "job_id": job_id,
+                    "total_documents": len(documents),
+                    "processed_count": job.processed_count,
+                    "failed_count": job.failed_count,
+                    "processing_time": round(job.end_time - job.start_time, 2) if job.end_time else 0,
+                    "message": f"Completed: {job.processed_count} succeeded, {job.failed_count} failed"
+                })
+            except:
+                logger.debug(f"Could not send completion message for job {job_id} (WebSocket likely closed)")
         
         # Cleanup
         processor.cleanup_job(job_id)
         
     except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected for job {job_id}")
+        logger.info(f"WebSocket disconnected for job {job_id}. Cancelling processing.")
+        # Cancel the job immediately when WebSocket disconnects
+        if job_id in processor.active_jobs:
+            processor.active_jobs[job_id].cancelled = True
+            logger.info(f"Job {job_id} cancelled due to WebSocket disconnect")
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON in WebSocket message: {str(e)}")
         try:
@@ -181,6 +203,9 @@ async def validate_paths(request: PathValidationRequest):
         ]
     }
     """
+    logger.info(f"Starting path validation for {len(request.paths)} paths")
+    start_time = time.time()
+    
     results: List[PathValidationResult] = []
     valid_count = 0
     invalid_count = 0
@@ -223,6 +248,9 @@ async def validate_paths(request: PathValidationRequest):
             invalid_count += 1
         
         results.append(result)
+    
+    elapsed_time = time.time() - start_time
+    logger.info(f"Path validation completed in {elapsed_time:.2f}s: {valid_count} valid, {invalid_count} invalid out of {len(results)} total")
     
     return PathValidationResponse(
         results=results,

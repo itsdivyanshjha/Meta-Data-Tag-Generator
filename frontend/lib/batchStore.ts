@@ -587,7 +587,7 @@ export const useBatchStore = create<BatchState>((set, get) => ({
       if (!pathColumnId) {
         console.warn('No file_path column found')
         set({ isValidating: false })
-        return
+        throw new Error('No file_path column mapped. Please map your file path column first.')
       }
       
       // Prepare paths for validation
@@ -596,27 +596,55 @@ export const useBatchStore = create<BatchState>((set, get) => ({
         type: typeColumnId ? (doc.data[typeColumnId] || 'url').toLowerCase() : 'url'
       }))
       
-      // Call validation API
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-      const response = await fetch(`${apiUrl}/api/batch/validate-paths`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paths })
-      })
-      
-      const data = await response.json()
-      
-      // Store results indexed by path
-      const validationResults: Record<string, ValidationResult> = {}
-      for (const result of data.results) {
-        validationResults[result.path] = result
+      if (paths.length === 0) {
+        set({ isValidating: false })
+        throw new Error('No paths to validate. Please load documents first.')
       }
       
-      set({ validationResults, isValidating: false })
+      console.log(`Validating ${paths.length} paths via /api/batch/validate-paths`)
+      
+      // Call validation API with timeout
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 120000) // 2 minute timeout
+      
+      try {
+        const response = await fetch(`${apiUrl}/api/batch/validate-paths`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths }),
+          signal: controller.signal
+        })
+        
+        clearTimeout(timeoutId)
+        
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}))
+          throw new Error(errorData.detail || errorData.message || `Validation failed: ${response.statusText}`)
+        }
+        
+        const data = await response.json()
+        console.log(`Validation complete: ${data.valid_count} valid, ${data.invalid_count} invalid`)
+        
+        // Store results indexed by path
+        const validationResults: Record<string, ValidationResult> = {}
+        for (const result of data.results) {
+          validationResults[result.path] = result
+        }
+        
+        set({ validationResults, isValidating: false })
+      } catch (fetchError: any) {
+        clearTimeout(timeoutId)
+        if (fetchError.name === 'AbortError') {
+          throw new Error('Validation timeout. Too many paths to validate. Try validating a smaller batch or check your network connection.')
+        }
+        throw fetchError
+      }
       
     } catch (error) {
       console.error('Validation error:', error)
       set({ isValidating: false })
+      throw error // Re-throw so the UI can show the error
     }
   },
   

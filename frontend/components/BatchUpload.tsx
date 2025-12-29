@@ -54,61 +54,59 @@ export default function BatchUpload({ config, exclusionFile }: BatchUploadProps)
   
   return (
     <div className="card h-full flex flex-col">
-      {/* Header */}
+      {/* Header - Fixed at top */}
       <div className="border-b border-gray-200 pb-3 px-6 pt-5 flex-shrink-0">
         <h2 className="text-lg font-bold text-gray-900">Batch CSV Upload</h2>
         <p className="text-sm text-gray-500 mt-1">Process multiple documents at once with real-time progress</p>
       </div>
 
-      {/* Content Area */}
-      <div className="flex-1 overflow-hidden flex flex-col">
+      {/* Scrollable Content Area - Contains ALL sections */}
+      <div className="flex-1 overflow-y-auto">
         {/* File Upload Section */}
         {!hasData && (
-          <div className="flex-1 overflow-y-auto px-6 py-6">
+          <div className="px-6 py-6">
             <FileUploader />
           </div>
         )}
 
-        {/* Spreadsheet Editor Section */}
+        {/* All Batch Processing Sections - Scrollable */}
         {hasData && (
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
-            {/* Column Mapping & Processing Controls - Fixed at top */}
-            <div className="px-6 py-4 border-b border-gray-200 bg-gray-50" style={{ flexShrink: 0 }}>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+          <div className="flex flex-col">
+            {/* Column Mapping & Processing Controls */}
+            <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <ColumnMappingPanel />
                 <ProcessingControls />
               </div>
             </div>
             
-            {/* Spreadsheet - Takes remaining space */}
-            <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-              <div style={{ position: 'absolute', inset: 0 }}>
-                <SpreadsheetEditor />
-              </div>
+            {/* Spreadsheet - Fixed height to show ~10 rows */}
+            <div className="px-6 py-4 border-b border-gray-200" style={{ height: '600px', minHeight: '500px' }}>
+              <SpreadsheetEditor />
             </div>
             
-            {/* Export Section - Fixed at bottom */}
+            {/* Export Section - Always visible when scrolled to */}
             {hasProcessedDocs && (
-              <div className="px-6 py-4 border-t border-gray-200 flex-shrink-0 bg-gray-50">
+              <div className="px-6 py-6 bg-gray-50">
                 <ExportPanel />
               </div>
             )}
-          </div>
-        )}
-
-        {/* Processing Progress Bar (if processing) */}
-        {isProcessing && (
-          <div className="px-6 py-3 bg-blue-50 border-t border-blue-200 flex-shrink-0">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-sm font-medium text-blue-800">Processing documents...</p>
-              <p className="text-sm text-blue-600">{Math.round(progress * 100)}%</p>
-            </div>
-            <div className="w-full bg-blue-200 rounded-full h-2">
-              <div 
-                className="h-full bg-blue-600 rounded-full transition-all duration-300"
-                style={{ width: `${progress * 100}%` }}
-              />
-            </div>
+            
+            {/* Processing Progress Bar (if processing) */}
+            {isProcessing && (
+              <div className="px-6 py-4 bg-blue-50 border-b border-blue-200">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-sm font-medium text-blue-800">Processing documents...</p>
+                  <p className="text-sm text-blue-600">{Math.round(progress * 100)}%</p>
+                </div>
+                <div className="w-full bg-blue-200 rounded-full h-2">
+                  <div 
+                    className="h-full bg-blue-600 rounded-full transition-all duration-300"
+                    style={{ width: `${progress * 100}%` }}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

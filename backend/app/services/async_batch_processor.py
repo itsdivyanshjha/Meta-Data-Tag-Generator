@@ -38,6 +38,7 @@ class BatchJob:
     results: List[Dict[str, Any]] = field(default_factory=list)
     start_time: Optional[float] = None
     end_time: Optional[float] = None
+    cancelled: bool = False  # Flag to indicate if job was cancelled
 
 
 class AsyncBatchProcessor:
@@ -120,11 +121,32 @@ class AsyncBatchProcessor:
             )
             
             for idx, doc_data in enumerate(job.documents):
+                # CHECK FOR CANCELLATION BEFORE EACH DOCUMENT
+                if job.cancelled:
+                    logger.info(f"Job {job.job_id} cancelled. Stopping at document {idx + 1}/{total}")
+                    job.status = "cancelled"
+                    job.end_time = time.time()
+                    return job
+                
+                # Check if WebSocket is still connected before processing
+                try:
+                    state = websocket.client_state
+                    state_name = state.name if hasattr(state, 'name') else str(state)
+                    if state_name != "CONNECTED":
+                        logger.info(f"WebSocket disconnected for job {job.job_id}. Cancelling job.")
+                        job.cancelled = True
+                        job.status = "cancelled"
+                        job.end_time = time.time()
+                        return job
+                except (AttributeError, TypeError):
+                    # If we can't check state, try to detect disconnect during send
+                    pass
+                
                 try:
                     # Extract document info using column mapping
                     doc_info = self._extract_document_info(doc_data, job.column_mapping)
                     
-                    # Send "processing" update
+                    # Send "processing" update (will fail silently if WebSocket closed)
                     await self._send_update(
                         websocket,
                         job_id=job.job_id,
@@ -135,12 +157,26 @@ class AsyncBatchProcessor:
                         progress=idx / total
                     )
                     
+                    # CHECK AGAIN AFTER SEND UPDATE (in case it detected disconnect)
+                    if job.cancelled:
+                        logger.info(f"Job {job.job_id} cancelled during update. Stopping.")
+                        job.status = "cancelled"
+                        job.end_time = time.time()
+                        return job
+                    
                     # Process the document
                     result = await self._process_single_document(
                         doc_info, 
                         job.config, 
                         tagger
                     )
+                    
+                    # CHECK FOR CANCELLATION AFTER PROCESSING
+                    if job.cancelled:
+                        logger.info(f"Job {job.job_id} cancelled. Stopping after document {idx + 1}.")
+                        job.status = "cancelled"
+                        job.end_time = time.time()
+                        return job
                     
                     # Update job stats
                     if result["success"]:
@@ -164,36 +200,82 @@ class AsyncBatchProcessor:
                         metadata=result.get("metadata")
                     )
                     
+                    # Final cancellation check before rate limit sleep
+                    if job.cancelled:
+                        logger.info(f"Job {job.job_id} cancelled. Stopping.")
+                        job.status = "cancelled"
+                        job.end_time = time.time()
+                        return job
+                    
                     # Rate limiting to avoid API overload
                     if idx < total - 1:
-                        await asyncio.sleep(self.RATE_LIMIT_DELAY)
+                        # Use asyncio.sleep which can be interrupted
+                        try:
+                            await asyncio.sleep(self.RATE_LIMIT_DELAY)
+                        except asyncio.CancelledError:
+                            logger.info(f"Job {job.job_id} cancelled during rate limit delay.")
+                            job.cancelled = True
+                            job.status = "cancelled"
+                            job.end_time = time.time()
+                            return job
                     
+                except asyncio.CancelledError:
+                    logger.info(f"Job {job.job_id} cancelled (CancelledError). Stopping.")
+                    job.cancelled = True
+                    job.status = "cancelled"
+                    job.end_time = time.time()
+                    return job
                 except Exception as e:
+                    # Check if this is a WebSocket disconnect error
+                    error_msg = str(e).lower()
+                    if "close" in error_msg or "disconnect" in error_msg or "send" in error_msg:
+                        logger.info(f"WebSocket error detected for job {job.job_id}. Cancelling job.")
+                        job.cancelled = True
+                        job.status = "cancelled"
+                        job.end_time = time.time()
+                        return job
+                    
                     logger.error(f"Error processing document {idx}: {str(e)}")
                     job.failed_count += 1
                     
-                    await self._send_update(
-                        websocket,
-                        job_id=job.job_id,
-                        row_id=idx,
-                        row_number=idx + 1,
-                        title=doc_data.get("title", f"Document {idx + 1}"),
-                        status=DocumentStatus.FAILED,
-                        progress=(idx + 1) / total,
-                        error=str(e)
-                    )
+                    # Try to send error update (may fail if WebSocket closed)
+                    try:
+                        await self._send_update(
+                            websocket,
+                            job_id=job.job_id,
+                            row_id=idx,
+                            row_number=idx + 1,
+                            title=doc_data.get("title", f"Document {idx + 1}"),
+                            status=DocumentStatus.FAILED,
+                            progress=(idx + 1) / total,
+                            error=str(e)
+                        )
+                    except:
+                        # WebSocket probably closed, cancel job
+                        job.cancelled = True
+                        job.status = "cancelled"
+                        job.end_time = time.time()
+                        return job
             
-            job.status = "completed"
-            job.end_time = time.time()
-            job.progress = 1.0
-            
-            logger.info(
-                f"Batch job {job.job_id} completed: "
-                f"{job.processed_count} succeeded, {job.failed_count} failed"
-            )
+            # Only mark as completed if not cancelled
+            if not job.cancelled:
+                job.status = "completed"
+                job.end_time = time.time()
+                job.progress = 1.0
+                
+                logger.info(
+                    f"Batch job {job.job_id} completed: "
+                    f"{job.processed_count} succeeded, {job.failed_count} failed"
+                )
             
             return job
             
+        except asyncio.CancelledError:
+            logger.info(f"Job {job.job_id} cancelled (outer CancelledError).")
+            job.cancelled = True
+            job.status = "cancelled"
+            job.end_time = time.time()
+            return job
         except Exception as e:
             job.status = "failed"
             job.end_time = time.time()
@@ -335,6 +417,17 @@ class AsyncBatchProcessor:
     ):
         """Send progress update via WebSocket"""
         try:
+            # Check WebSocket connection state (handle both enum and string states)
+            try:
+                state = websocket.client_state
+                state_name = state.name if hasattr(state, 'name') else str(state)
+                if state_name != "CONNECTED":
+                    logger.debug(f"WebSocket for job {job_id} is not connected (state: {state_name}). Skipping update.")
+                    return
+            except (AttributeError, TypeError):
+                # Fallback: Try to send anyway, exception handling below will catch it
+                pass
+            
             update = WebSocketProgressUpdate(
                 job_id=job_id,
                 row_id=row_id,
@@ -350,11 +443,26 @@ class AsyncBatchProcessor:
             await websocket.send_json(update.model_dump())
             
         except Exception as e:
-            logger.error(f"Error sending WebSocket update: {str(e)}")
+            # Only log if it's not a connection closed error (expected when client disconnects)
+            error_msg = str(e).lower()
+            if "close" not in error_msg and "disconnect" not in error_msg and "send" not in error_msg:
+                logger.error(f"Error sending WebSocket update for job {job_id}: {str(e)}")
+            else:
+                # Connection closed errors are expected when client disconnects - log at debug level
+                logger.debug(f"WebSocket send failed for job {job_id} (likely connection closed): {str(e)}")
     
     def get_job(self, job_id: str) -> Optional[BatchJob]:
         """Get a job by ID"""
         return self.active_jobs.get(job_id)
+    
+    def cancel_job(self, job_id: str) -> bool:
+        """Cancel a running job"""
+        if job_id in self.active_jobs:
+            job = self.active_jobs[job_id]
+            job.cancelled = True
+            logger.info(f"Job {job_id} marked for cancellation")
+            return True
+        return False
     
     def cleanup_job(self, job_id: str):
         """Remove a completed job from memory"""

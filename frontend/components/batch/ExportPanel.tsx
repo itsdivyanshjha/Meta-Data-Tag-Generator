@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useBatchStore } from '@/lib/batchStore'
 
 export default function ExportPanel() {
@@ -10,6 +10,13 @@ export default function ExportPanel() {
   const [includeOnlySuccess, setIncludeOnlySuccess] = useState(false)
   
   const { columns, documents, exportAsCSV } = useBatchStore()
+  
+  // Initialize selectedColumns with all column IDs when columns load
+  useEffect(() => {
+    if (columns.length > 0 && selectedColumns.length === 0) {
+      setSelectedColumns(columns.map(col => col.id))
+    }
+  }, [columns])
   
   // Calculate stats
   const successCount = documents.filter(d => d.status === 'success').length
@@ -86,7 +93,7 @@ export default function ExportPanel() {
       
       {/* Advanced export options */}
       {isOpen && (
-        <div className="p-4 bg-gray-50 border border-gray-200 rounded space-y-4">
+        <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg space-y-4">
           <div className="space-y-2">
             <label className="flex items-center gap-2">
               <input
@@ -101,22 +108,20 @@ export default function ExportPanel() {
           
           <div className="space-y-2">
             <h4 className="text-sm font-medium text-gray-700">Columns to Export</h4>
-            <div className="max-h-48 overflow-y-auto space-y-1">
+            <div className="max-h-48 overflow-y-auto space-y-1 border border-gray-200 rounded-lg p-3 bg-white">
               {columns.map(col => (
-                <label key={col.id} className="flex items-center gap-2 text-sm">
+                <label key={col.id} className="flex items-center gap-2 text-sm hover:bg-gray-50 p-1.5 rounded cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={selectedColumns.length === 0 || selectedColumns.includes(col.id)}
+                    checked={selectedColumns.includes(col.id)}
                     onChange={(e) => {
                       if (e.target.checked) {
-                        setSelectedColumns(prev => 
-                          prev.length === 0 ? [col.id] : [...prev, col.id]
-                        )
+                        setSelectedColumns(prev => [...prev, col.id])
                       } else {
                         setSelectedColumns(prev => prev.filter(id => id !== col.id))
                       }
                     }}
-                    className="rounded text-blue-600"
+                    className="rounded text-blue-600 cursor-pointer"
                   />
                   <span>{col.name}</span>
                   {col.systemColumn && (
@@ -124,14 +129,14 @@ export default function ExportPanel() {
                   )}
                 </label>
               ))}
-              <label className="flex items-center gap-2 text-sm">
+              <label className="flex items-center gap-2 text-sm bg-green-50 p-1.5 rounded">
                 <input
                   type="checkbox"
                   checked={true}
                   disabled
-                  className="rounded text-blue-600"
+                  className="rounded text-blue-600 opacity-50 cursor-not-allowed"
                 />
-                <span>Generated Tags</span>
+                <span className="font-medium">Generated Tags</span>
                 <span className="text-xs text-green-600">(always included)</span>
               </label>
             </div>
