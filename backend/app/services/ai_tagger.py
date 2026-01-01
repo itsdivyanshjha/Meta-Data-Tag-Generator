@@ -100,9 +100,18 @@ LANGUAGE SUPPORT: You understand ALL Indian languages including:
 YOUR TASK: 
 1. Read and understand the document in its native language(s)
 2. Extract key concepts, topics, and themes
-3. ALWAYS generate tags in ENGLISH ONLY (translate concepts from any language to English)
-4. Generate the EXACT number of tags requested (this is critical!)
-5. Return ONLY comma-separated lowercase English tags for universal searchability
+3. Generate CONCISE TAGS (1-3 words each, hyphenated if needed)
+4. Tags should be KEYWORDS, not sentences or long phrases
+5. Generate the EXACT number of tags requested (this is critical!)
+6. ALWAYS generate tags in ENGLISH ONLY (translate concepts from any language to English)
+7. Return ONLY comma-separated lowercase English tags for universal searchability
+
+TAG FORMAT RULES:
+✓ Single concept tags: "scholarship", "employment", "census"
+✓ Multi-word tags: Use hyphens: "sc-welfare", "annual-report", "skill-training"
+✓ Maximum 3 words per tag (prefer 1-2 words)
+✓ Think KEYWORDS not PHRASES
+✗ NO long phrases: "dr ambedkar foundation annual report 2015" is TOO LONG
 
 OUTPUT FORMAT: comma-separated tags only, nothing else"""
                         },
@@ -427,82 +436,85 @@ Content Preview (may contain Indian language text):
 CRITICAL RULES - READ CAREFULLY:
 
 🚫 NEVER USE THESE GENERIC/USELESS TAGS:
-- Structural info: "contact details", "delhi address", "phone number", "email", "address", "office location"
-- Document metadata: "hindi document", "hindi language", "publication", "document", "report"
-- Generic descriptors: "government organization", "ministry", "department", "foundation" (without specifics)
-- Vague terms: "social welfare", "empowerment", "development" (too broad)
+- Structural info: "contact-details", "phone-number", "email", "address"
+- Document metadata: "hindi-document", "publication", "document", "pdf"
+- Generic descriptors: "government", "ministry", "department", "foundation" (alone, without specifics)
+- Vague terms: "social-welfare", "empowerment", "development" (too broad)
+- Long phrases: "dr ambedkar foundation annual report 2015" (BREAK INTO SEPARATE TAGS!)
 
-✅ ALWAYS USE SPECIFIC, SEARCHABLE TAGS:
+✅ TAG LENGTH REQUIREMENTS:
+- 1 word: "scholarship", "census", "budget", "employment" ✓
+- 2 words: "sc-welfare", "annual-report", "skill-training" ✓
+- 3 words: "budget-allocation-2015", "sc-student-scholarship" ✓
+- 4+ words: "dr ambedkar foundation annual report" ✗ TOO LONG - SPLIT IT!
 
-1. SPECIFIC ORGANIZATION NAMES (exact names only):
-   ✅ "dr ambedkar foundation"
-   ✅ "national commission for scheduled castes"
-   ❌ "government organization"
+RULE: If you're writing 4+ words, you're writing a PHRASE not a TAG.
+Split it: "dr ambedkar foundation annual report 2015" → ["ambedkar-foundation", "annual-report-2015"]
 
-2. DOCUMENT TYPE WITH CONTEXT (be precise):
-   ✅ "annual report 2015-16"
-   ✅ "quarterly newsletter december 2023"
-   ❌ "annual report" (too vague)
-   ❌ "publication"
+✅ GENERATE TAGS FROM THESE CATEGORIES:
 
-3. SPECIFIC PROGRAMS/SCHEMES (actual names):
-   ✅ "pradhan mantri rojgar yojana"
-   ✅ "post matric scholarship sc students"
-   ✅ "skill development training program"
-   ❌ "scholarship programs" (too generic)
-   ❌ "welfare schemes"
+1. ENTITIES (organizations, people, places):
+   ✅ "ambedkar-foundation", "ncsc", "delhi-office", "ministry-social-justice"
+   ❌ "dr ambedkar foundation" (too long - use "ambedkar-foundation")
 
-4. CONCRETE TOPICS/EVENTS (specific subjects):
-   ✅ "sant ravidas jayanti celebration 2016"
-   ✅ "backward classes census data analysis"
-   ✅ "legal aid clinics for sc st communities"
-   ❌ "social welfare"
-   ❌ "empowerment"
+2. PROGRAMS/SCHEMES (use abbreviations or short names):
+   ✅ "pmkvy", "post-matric-scholarship", "skill-development", "rojgar-yojana"
+   ❌ "pradhan mantri kaushal vikas yojana" (use "pmkvy" or "kaushal-vikas")
 
-5. SPECIFIC BENEFICIARY GROUPS (when mentioned):
-   ✅ "scheduled caste entrepreneurs"
-   ✅ "obc artisan communities"
-   ✅ "divyang students higher education"
-   ❌ "scheduled castes" (alone, too broad)
+3. DOCUMENT TYPE (include year if relevant):
+   ✅ "annual-report-2015", "newsletter-q4", "budget-document", "guidelines"
+   ❌ "quarterly newsletter december 2023" (too long - use "newsletter-dec-2023")
 
-6. ACTIONABLE CONTENT (what the document does):
-   ✅ "budget allocation breakdown 2015"
-   ✅ "achievement statistics quarterly"
-   ✅ "workshop guidelines for ngos"
-   ❌ "information"
-   ❌ "details"
+4. BENEFICIARIES (target groups):
+   ✅ "sc-students", "obc-artisans", "divyang-students", "sc-entrepreneurs"
+   ❌ "scheduled caste students in higher education" (too long)
 
-7. DATES WITH CONTEXT (specific time references):
-   ✅ "budget 2015-16"
-   ✅ "february 2016 activities"
-   ❌ "2015" (alone)
+5. TOPICS/THEMES (key subjects):
+   ✅ "legal-aid", "employment-generation", "grievance-redressal", "skill-training"
+   ❌ "legal aid clinics for marginalized communities" (too descriptive)
 
-QUALITY CHECK - Each tag must be:
-- SEARCHABLE: Would someone search for this exact phrase?
-- UNIQUE: Does it distinguish this document from others?
-- MEANINGFUL: Does it describe content, not format?
-- SPECIFIC: Could it be more precise? If yes, make it so!
+6. EVENTS/ACTIVITIES:
+   ✅ "ravidas-jayanti-2016", "workshop-2023", "awareness-campaign"
+   ❌ "sant ravidas jayanti celebration 2016" (too long - use "ravidas-jayanti-2016")
+
+7. TIME REFERENCES (attach to relevant tags):
+   ✅ "budget-2015-16", "q4-2023", "february-2016"
+   ❌ "february 2016 activities" (too long - use "activities-feb-2016")
+
+QUALITY CHECK - Each tag must pass ALL tests:
+✓ CONCISE: 1-3 words maximum (use hyphens for multi-word)
+✓ SEARCHABLE: Would someone search for this exact keyword?
+✓ UNIQUE: Does it distinguish this document from others?
+✓ MEANINGFUL: Does it describe content, not format?
+✓ ATOMIC: Represents ONE concept/entity
+
+If a tag has 4+ words, it FAILS - split into multiple tags.
 
 BAD EXAMPLE TAGS (NEVER do this):
-{{"contact details", "delhi address", "hindi document", "government organization", "social welfare", "empowerment", "publication"}}
+{{"contact-details", "hindi-document", "government-organization", "dr ambedkar foundation annual report 2015", "social justice ministry schemes overview", "scheduled caste welfare budget allocation details"}}
+ ↑ generic          ↑ metadata        ↑ too vague                ↑ WAY TOO LONG (7 words!)             ↑ TOO LONG (5 words)                     ↑ TOO LONG (6 words)
 
 GOOD EXAMPLE TAGS (ALWAYS do this):
-{{"dr ambedkar foundation annual report 2015", "sc welfare budget allocation", "backward classes development schemes", "pradhan mantri kaushal vikas yojana", "scholarship programs marginalized students", "sant ravidas jayanti 2016", "ncsc grievance redressal statistics", "legal aid awareness camps"}}
+{{"ambedkar-foundation", "annual-report-2015", "sc-welfare-budget", "backward-classes", "pmkvy", "kaushal-vikas", "post-matric-scholarship", "ravidas-jayanti-2016", "ncsc-grievances", "legal-aid-camps", "skill-training", "employment-schemes"}}
+ ↑ 2 words          ↑ 3 words with date ↑ 3 words specific    ↑ 2 words       ↑ abbreviation ↑ 2 words      ↑ 3 words specific        ↑ 3 words with date   ↑ 2 words        ↑ 3 words         ↑ 2 words       ↑ 2 words
 
 NOW GENERATE {num_tags} TAGS FOR THIS DOCUMENT:
+- Each tag MUST be 1-3 words maximum (use hyphens for multi-word)
 - Each tag MUST be specific and searchable
-- NO generic terms like "contact details", "address", "hindi document", "organization"
+- NO generic terms like "contact-details", "hindi-document", "government"
+- NO long phrases - if it's 4+ words, SPLIT IT into separate tags
 - Focus on WHAT the document contains, not document metadata
-- Use full names and specific program/scheme names
-- Include year/date context where relevant
+- Use abbreviations or short names for programs (e.g., "pmkvy" not "pradhan mantri kaushal vikas yojana")
+- Include year/date context where relevant (e.g., "report-2015", "budget-2015-16")
 
 Output Format:
 - Comma-separated tags ONLY
-- Lowercase English
+- Lowercase English with hyphens for multi-word tags
 - EXACTLY {num_tags} tags (this is CRITICAL - count carefully!)
+- Each tag 1-3 words maximum
 - NO explanations, NO numbering, NO extra text
 
-Generate EXACTLY {num_tags} high-quality tags:"""
+Generate EXACTLY {num_tags} concise high-quality tags:"""
         
         return prompt
     
@@ -552,19 +564,19 @@ Generate EXACTLY {num_tags} high-quality tags:"""
         """Parse and clean tags from AI response (English only output)"""
         logger.info(f"Parsing tags from: '{tags_text}'")
         
-        # Generic/useless terms to automatically filter out
+        # Generic/useless terms to automatically filter out (both spaced and hyphenated versions)
         GENERIC_TERMS = {
-            'contact details', 'contact information', 'contact info',
-            'delhi address', 'address', 'office address', 'phone number', 'email',
-            'hindi document', 'hindi language', 'english document', 'language',
+            'contact details', 'contact-details', 'contact information', 'contact-information', 'contact info', 'contact-info',
+            'delhi address', 'delhi-address', 'address', 'office address', 'office-address', 'phone number', 'phone-number', 'email',
+            'hindi document', 'hindi-document', 'hindi language', 'hindi-language', 'english document', 'english-document', 'language',
             'publication', 'document', 'report', 'information',
-            'government organization', 'organization', 'ministry', 'department', 'foundation',
-            'social welfare', 'empowerment', 'development',
+            'government organization', 'government-organization', 'organization', 'ministry', 'department', 'foundation',
+            'social welfare', 'social-welfare', 'empowerment', 'development',
             'details', 'information', 'data',
-            'office location', 'headquarters', 'contact',
-            'annual report', 'newsletter',  # Too generic without year
-            'government', 'india', 'organization details',
-            'publication date', 'published', 'pdf', 'document type'
+            'office location', 'office-location', 'headquarters', 'contact',
+            'annual report', 'annual-report', 'newsletter',  # Too generic without year
+            'government', 'india', 'organization details', 'organization-details',
+            'publication date', 'publication-date', 'published', 'pdf', 'document type', 'document-type'
         }
         
         # Remove any markdown formatting
@@ -613,6 +625,20 @@ Generate EXACTLY {num_tags} high-quality tags:"""
             if original_tag != tag:
                 logger.debug(f"Cleaned tag: '{original_tag}' -> '{tag}'")
             
+            # Check word count - reject tags with 4+ words (too phrase-like)
+            words = tag.split()
+            if len(words) > 3:
+                logger.warning(f"🚫 Tag rejected (too long - {len(words)} words): '{tag}'")
+                logger.info(f"   💡 Suggestion: Split into separate tags")
+                rejected_generic.append(tag)
+                continue
+            
+            # Auto-hyphenate multi-word tags (2-3 words) if not already hyphenated
+            if len(words) >= 2 and '-' not in tag:
+                original_unhyphenated = tag
+                tag = '-'.join(words)
+                logger.debug(f"Auto-hyphenated: '{original_unhyphenated}' → '{tag}'")
+            
             # Check if tag is gibberish
             if self._is_gibberish_tag(tag):
                 rejected_generic.append(tag)
@@ -624,12 +650,13 @@ Generate EXACTLY {num_tags} high-quality tags:"""
                 rejected_generic.append(tag)
                 continue
             
-            # Check if tag contains only generic terms
-            words = tag.split()
-            if len(words) == 1 and tag in ['hindi', 'english', 'contact', 'address', 'document', 
-                                            'report', 'publication', 'information', 'details',
-                                            'government', 'organization', 'ministry', 'foundation']:
-                logger.warning(f"Tag rejected (single generic word): '{tag}'")
+            # Check if tag contains only generic terms (single words)
+            tag_words = tag.replace('-', ' ').split()  # Split by hyphen or space for checking
+            if len(tag_words) == 1 and tag in ['hindi', 'english', 'contact', 'address', 'document', 
+                                                'report', 'publication', 'information', 'details',
+                                                'government', 'organization', 'ministry', 'foundation',
+                                                'pdf', 'file', 'office', 'email', 'phone']:
+                logger.warning(f"🚫 Tag rejected (single generic word): '{tag}'")
                 rejected_generic.append(tag)
                 continue
             
