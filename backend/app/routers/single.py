@@ -148,9 +148,9 @@ async def process_single_pdf(
                 detail="Could not extract sufficient text from PDF. The document might be scanned or image-based without OCR support."
             )
         
-        # Generate tags with exclusion list
+        # Generate tags with exclusion list and language awareness
         tagger = AITagger(
-            tagging_config.api_key, 
+            tagging_config.api_key,
             tagging_config.model_name,
             exclusion_words=tagging_config.exclusion_words
         )
@@ -158,7 +158,10 @@ async def process_single_pdf(
             title=extraction_result.get("title", document_name or "Untitled"),
             description="",
             content=extraction_result["extracted_text"],
-            num_tags=tagging_config.num_tags
+            num_tags=tagging_config.num_tags,
+            detected_language=extraction_result.get("detected_language"),
+            language_name=extraction_result.get("language_name"),
+            quality_info=extraction_result.get("quality_info")
         )
         
         logger.info(f"Tagging result success: {tagging_result['success']}")

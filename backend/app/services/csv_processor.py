@@ -174,12 +174,15 @@ class CSVProcessor:
                 result["error"] = "Insufficient text extracted from document"
                 return result
             
-            # Generate tags
+            # Generate tags with language awareness
             tagging_result = self.tagger.generate_tags(
                 title=result["title"],
                 description=description,
                 content=extraction_result["extracted_text"],
-                num_tags=self.config.num_tags
+                num_tags=self.config.num_tags,
+                detected_language=extraction_result.get("detected_language"),
+                language_name=extraction_result.get("language_name"),
+                quality_info=extraction_result.get("quality_info")
             )
             
             if not tagging_result["success"]:

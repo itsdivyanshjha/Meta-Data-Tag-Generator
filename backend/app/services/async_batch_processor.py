@@ -395,12 +395,15 @@ class AsyncBatchProcessor:
                 "text_length": len(extracted_text)
             }
             
-            # Generate tags
+            # Generate tags with language awareness
             tagging_result = tagger.generate_tags(
                 title=doc_info.get("title", ""),
                 description=doc_info.get("description", ""),
                 content=extracted_text,
-                num_tags=config.num_tags
+                num_tags=config.num_tags,
+                detected_language=extraction_result.get("detected_language"),
+                language_name=extraction_result.get("language_name"),
+                quality_info=extraction_result.get("quality_info")
             )
             
             if not tagging_result["success"]:

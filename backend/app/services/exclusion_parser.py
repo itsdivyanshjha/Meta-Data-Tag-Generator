@@ -1,6 +1,14 @@
 from typing import Set
 import logging
 
+# Encoding detection
+try:
+    import chardet
+    CHARDET_AVAILABLE = True
+except ImportError:
+    CHARDET_AVAILABLE = False
+    print("⚠️ chardet not available. Install with: pip install chardet")
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,12 +66,40 @@ class ExclusionListParser:
         filename_lower = filename.lower()
         
         if filename_lower.endswith('.txt'):
-            try:
-                text = file_bytes.decode('utf-8')
-            except UnicodeDecodeError:
-                # Try with different encoding
-                text = file_bytes.decode('latin-1')
-            
+            # Auto-detect encoding using chardet if available
+            if CHARDET_AVAILABLE:
+                try:
+                    detected = chardet.detect(file_bytes)
+                    encoding = detected['encoding']
+                    confidence = detected['confidence']
+
+                    logger.info(f"Detected encoding: {encoding} (confidence: {confidence:.2%})")
+
+                    # Use detected encoding if confidence is reasonable
+                    if confidence > 0.7:
+                        try:
+                            text = file_bytes.decode(encoding)
+                            logger.info(f"Successfully decoded with {encoding}")
+                            return ExclusionListParser.parse_from_text(text)
+                        except Exception as e:
+                            logger.warning(f"Failed to decode with detected encoding {encoding}: {e}")
+                            # Fall through to manual attempts below
+
+                except Exception as e:
+                    logger.warning(f"Encoding detection failed: {e}")
+
+            # Fallback: Try common encodings manually
+            for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                try:
+                    text = file_bytes.decode(encoding)
+                    logger.info(f"Successfully decoded with {encoding} (fallback)")
+                    return ExclusionListParser.parse_from_text(text)
+                except UnicodeDecodeError:
+                    continue
+
+            # Last resort: decode with errors='replace'
+            logger.warning("All encoding attempts failed, using UTF-8 with error replacement")
+            text = file_bytes.decode('utf-8', errors='replace')
             return ExclusionListParser.parse_from_text(text)
         
         elif filename_lower.endswith('.pdf'):

@@ -41,21 +41,27 @@ class AITagger:
         )
     
     def generate_tags(
-        self, 
-        title: str, 
-        description: str, 
-        content: str, 
-        num_tags: int = 8
+        self,
+        title: str,
+        description: str,
+        content: str,
+        num_tags: int = 8,
+        detected_language: Optional[str] = None,
+        language_name: Optional[str] = None,
+        quality_info: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Generate tags for document with exclusion filtering
-        
+        Generate tags for document with exclusion filtering and language awareness
+
         Args:
             title: Document title
             description: Document description
             content: Extracted text content
             num_tags: Number of tags to generate (exact number will be returned after filtering)
-            
+            detected_language: Language code (e.g., 'hi', 'en', 'kn', 'ta')
+            language_name: Full language name (e.g., 'Hindi', 'English', 'Kannada')
+            quality_info: Document quality metrics from PDF extractor
+
         Returns:
             dict with tags list and metadata
         """
@@ -74,8 +80,20 @@ class AITagger:
             
             logger.info(f"🎯 Target: {num_tags} tags | Requesting: {requested_tags} tags (3x buffer for filters)")
             logger.info(f"   Active filters: gibberish detection, generic terms, exclusion list ({len(self.exclusion_words)} words)")
-            
-            prompt = self._build_prompt(title, description, content, requested_tags)
+            if language_name:
+                logger.info(f"🌐 Document language: {language_name} ({detected_language})")
+            if quality_info:
+                logger.info(f"📊 Document quality: {quality_info.get('quality_tier', 'unknown')} ({quality_info.get('type', 'unknown')})")
+
+            prompt = self._build_prompt(
+                title,
+                description,
+                content,
+                requested_tags,
+                detected_language,
+                language_name,
+                quality_info
+            )
             
             try:
                 response = self.client.chat.completions.create(
@@ -132,33 +150,50 @@ OUTPUT FORMAT: comma-separated tags only, nothing else"""
                     except:
                         pass
                 
-                # Fallback strategy: Try with more aggressive sanitization
-                logger.info("🔄 Retrying with aggressive sanitization (ASCII-only fallback)...")
-                logger.warning("⚠️ This may lose Indian language content - for debugging only")
-                
-                # Strip all non-ASCII as last resort
-                content_ascii = content.encode('ascii', errors='ignore').decode('ascii')
-                title_ascii = title.encode('ascii', errors='ignore').decode('ascii')
-                description_ascii = description.encode('ascii', errors='ignore').decode('ascii')
-                
-                if not content_ascii.strip():
-                    logger.error("❌ Document is entirely non-ASCII. Cannot process with ASCII fallback.")
+                # Safer fallback strategy: Remove only problematic characters, keep Indic content
+                logger.info("🔄 Retrying with safer Unicode cleanup...")
+                logger.warning("⚠️ Applying additional sanitization while preserving Indic scripts")
+
+                # Clean by removing ONLY control characters, not all non-ASCII
+                def safe_clean(text):
+                    cleaned = ''
+                    for char in text:
+                        cat = unicodedata.category(char)
+                        # Keep everything except control characters (except whitespace)
+                        if cat[0] != 'C' or char in '\n\t\r ':
+                            cleaned += char
+                    return cleaned
+
+                content_safe = safe_clean(content)
+                title_safe = safe_clean(title)
+                description_safe = safe_clean(description)
+
+                if not content_safe.strip():
+                    logger.error("❌ Document content is empty after safe cleanup.")
                     return {
                         "success": False,
-                        "error": "Document encoding issue: Document is entirely in non-ASCII script and cannot be processed due to encoding limitations.",
+                        "error": "Document encoding issue: Unable to process document due to encoding limitations.",
                         "tags": []
                     }
                 
-                prompt_ascii = self._build_prompt(title_ascii, description_ascii, content_ascii, requested_tags)
-                
+                prompt_safe = self._build_prompt(
+                    title_safe,
+                    description_safe,
+                    content_safe,
+                    requested_tags,
+                    detected_language,
+                    language_name,
+                    quality_info
+                )
+
                 response = self.client.chat.completions.create(
                     model=self.model_name,
                     messages=[
                         {
-                            "role": "system", 
+                            "role": "system",
                             "content": "You are a document tagging expert. Generate ENGLISH tags only. Return comma-separated lowercase tags."
                         },
-                        {"role": "user", "content": prompt_ascii}
+                        {"role": "user", "content": prompt_safe}
                     ],
                     max_tokens=400,
                     temperature=0.2
@@ -351,11 +386,12 @@ OUTPUT FORMAT: comma-separated tags only, nothing else"""
             '\u2022': '*',    # •
             '\u2023': '>',    # ‣
             
-            # Zero-width and invisible characters (cause encoding issues)
-            '\u200b': '',     # Zero-width space
-            '\u200c': '',     # Zero-width non-joiner
-            '\u200d': '',     # Zero-width joiner
-            '\ufeff': '',     # Zero-width no-break space (BOM)
+            # Zero-width and invisible characters
+            # CRITICAL: Preserve ZWJ/ZWNJ for proper Indic script rendering
+            '\u200b': '',     # Zero-width space (remove - causes issues)
+            # '\u200c': '',   # Zero-width non-joiner (PRESERVE for Indic)
+            # '\u200d': '',   # Zero-width joiner (PRESERVE for Indic)
+            '\ufeff': '',     # Zero-width no-break space (BOM - remove)
             
             # Other problematic characters
             '\u00a0': ' ',    # Non-breaking space
@@ -378,36 +414,74 @@ OUTPUT FORMAT: comma-separated tags only, nothing else"""
             logger.info(f"🌐 Multilingual document detected: {scripts_summary}")
         
         # Ensure clean UTF-8 encoding
-        # CRITICAL: Use 'replace' not 'ignore' to preserve all valid Unicode
+        # CRITICAL: Preserve ALL Indian language content - never fall back to ASCII
         try:
             # Normalize to NFC (Canonical Composition) for consistency
             text = unicodedata.normalize('NFC', text)
-            
+
             # Ensure proper UTF-8 encoding
             text = text.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
         except Exception as e:
             logger.error(f"❌ Text encoding error: {e}")
-            # Last resort: try to salvage what we can
-            text = text.encode('ascii', errors='ignore').decode('ascii')
-            logger.warning("⚠️ Fell back to ASCII-only encoding - some content may be lost")
-        
+            # Safer fallback: Remove ONLY control characters, keep all valid Unicode
+            import re
+            # Remove control characters (category 'C') except whitespace
+            cleaned = ''
+            for char in text:
+                cat = unicodedata.category(char)
+                if cat[0] != 'C' or char in '\n\t\r ':
+                    cleaned += char
+            text = cleaned
+            logger.warning("⚠️ Applied safe encoding cleanup - Indic scripts preserved")
+
         return text
     
     def _build_prompt(
-        self, 
-        title: str, 
-        description: str, 
-        content: str, 
-        num_tags: int
+        self,
+        title: str,
+        description: str,
+        content: str,
+        num_tags: int,
+        detected_language: Optional[str] = None,
+        language_name: Optional[str] = None,
+        quality_info: Optional[Dict[str, Any]] = None
     ) -> str:
-        """Build prompt for AI with exclusion guidance"""
+        """
+        Build prompt for AI with language awareness and exclusion guidance
+
+        Args:
+            title: Document title
+            description: Document description
+            content: Document content
+            num_tags: Number of tags to request
+            detected_language: Language code (e.g., 'hi', 'kn')
+            language_name: Full language name (e.g., 'Hindi', 'Kannada')
+            quality_info: Quality metrics from PDF extractor
+
+        Returns:
+            Formatted prompt string
+        """
         # Sanitize inputs to handle Unicode properly
         title = self._sanitize_text_for_api(title)
         description = self._sanitize_text_for_api(description)
         content = self._sanitize_text_for_api(content)
-        
-        # Truncate content if too long
-        content_preview = content[:1500] if len(content) > 1500 else content
+
+        # Truncate content if too long (increased from 1500 to 2000 for better context)
+        content_preview = content[:2000] if len(content) > 2000 else content
+
+        # Build language context string
+        language_context = ""
+        if language_name and detected_language:
+            language_context = f"\n**DETECTED LANGUAGE**: {language_name} ({detected_language})"
+            if detected_language != 'en':
+                language_context += f"\nNote: This document is primarily in {language_name}. Focus on extracting domain-specific concepts and translating them to English tags."
+
+        # Build quality context string
+        quality_context = ""
+        if quality_info:
+            quality_tier = quality_info.get('quality_tier', 'unknown')
+            doc_type = quality_info.get('type', 'unknown')
+            quality_context = f"\n**DOCUMENT QUALITY**: {quality_tier} quality {doc_type} document"
         
         # Add exclusion guidance if we have an exclusion list
         exclusion_guidance = ""
@@ -422,15 +496,17 @@ The following common/generic terms should be AVOIDED:
 Generate tags that are SPECIFIC and UNIQUE to this document, avoiding all these common terms.
 """
         
-        prompt = f"""You are analyzing an Indian government/organizational document that may be in ANY Indian language (Hindi, Kannada, Tamil, Telugu, Bengali, Marathi, Gujarati, Punjabi, Malayalam, Odia, Assamese, etc.) or English or mixed.
+        prompt = f"""You are analyzing an Indian government/organizational document.
+{language_context}{quality_context}
 
 Your task: Generate exactly {num_tags} HIGHLY SPECIFIC and UNIQUE meta-data tags in ENGLISH ONLY (translate concepts from any language to English).
 {exclusion_guidance}
 
-Document Title: {title}
+**DOCUMENT INFORMATION**:
+Title: {title}
 Description: {description if description else 'N/A'}
 
-Content Preview (may contain Indian language text):
+**CONTENT PREVIEW**:
 {content_preview}
 
 CRITICAL RULES - READ CAREFULLY:

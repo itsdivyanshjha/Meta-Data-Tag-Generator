@@ -4,6 +4,16 @@ from typing import Dict, Any, Optional
 import re
 import logging
 
+# Language detection
+try:
+    from langdetect import detect, DetectorFactory
+    # Set seed for consistent results
+    DetectorFactory.seed = 0
+    LANGDETECT_AVAILABLE = True
+except ImportError:
+    LANGDETECT_AVAILABLE = False
+    print("⚠️ langdetect not available. Install with: pip install langdetect")
+
 # OCR imports with graceful fallback
 try:
     import pytesseract
@@ -31,23 +41,138 @@ logger.info(f"📦 OCR Availability: Tesseract={OCR_AVAILABLE}, EasyOCR={EASYOCR
 class PDFExtractor:
     """
     Hybrid PDF text extractor with automatic OCR fallback for scanned documents
-    
+
     Features:
     - Primary: PyPDF2 for text-based PDFs (fastest)
     - Fallback 1: Tesseract OCR for scanned PDFs (fast, good for Hindi)
     - Fallback 2: EasyOCR for complex Indian languages (slower but more accurate)
     - Auto-detection: Determines if PDF is scanned based on text extraction results
     - Multi-language: Supports 80+ languages including all Indian languages
+    - Language detection: Auto-detects document language for optimal OCR
+    - Quality detection: Analyzes document quality to route to best OCR engine
     """
-    
+
     # Threshold: if we extract less than this many chars per page, consider it scanned
     SCANNED_THRESHOLD_CHARS_PER_PAGE = 150
-    
+
     # Confidence threshold to try EasyOCR after Tesseract
     TESSERACT_CONFIDENCE_THRESHOLD = 60
-    
+
     # EasyOCR reader instance (loaded once, reused)
     _easyocr_reader = None
+
+    # Language code mapping for OCR engines
+    # Maps langdetect codes to Tesseract and EasyOCR language configurations
+    OCR_LANGUAGE_MAP = {
+        'hi': {
+            'name': 'Hindi',
+            'tesseract': 'hin+eng',
+            'easyocr': ['hi', 'en'],
+            'script': 'Devanagari'
+        },
+        'kn': {
+            'name': 'Kannada',
+            'tesseract': 'kan+eng',
+            'easyocr': ['kn', 'en'],
+            'script': 'Kannada'
+        },
+        'ta': {
+            'name': 'Tamil',
+            'tesseract': 'tam+eng',
+            'easyocr': ['ta', 'en'],
+            'script': 'Tamil'
+        },
+        'te': {
+            'name': 'Telugu',
+            'tesseract': 'tel+eng',
+            'easyocr': ['te', 'en'],
+            'script': 'Telugu'
+        },
+        'bn': {
+            'name': 'Bengali',
+            'tesseract': 'ben+eng',
+            'easyocr': ['bn', 'en'],
+            'script': 'Bengali'
+        },
+        'gu': {
+            'name': 'Gujarati',
+            'tesseract': 'guj+eng',
+            'easyocr': ['gu', 'en'],
+            'script': 'Gujarati'
+        },
+        'ml': {
+            'name': 'Malayalam',
+            'tesseract': 'mal+eng',
+            'easyocr': ['ml', 'en'],
+            'script': 'Malayalam'
+        },
+        'mr': {
+            'name': 'Marathi',
+            'tesseract': 'mar+eng',
+            'easyocr': ['mr', 'en'],
+            'script': 'Devanagari'
+        },
+        'pa': {
+            'name': 'Punjabi',
+            'tesseract': 'pan+eng',
+            'easyocr': ['pa', 'en'],
+            'script': 'Gurmukhi'
+        },
+        'or': {
+            'name': 'Odia',
+            'tesseract': 'ori+eng',
+            'easyocr': ['bn', 'en'],  # EasyOCR doesn't have Odia, use Bengali (similar script)
+            'script': 'Odia'
+        },
+        'as': {
+            'name': 'Assamese',
+            'tesseract': 'asm+eng',
+            'easyocr': ['as', 'en'],
+            'script': 'Bengali'
+        },
+        'ur': {
+            'name': 'Urdu',
+            'tesseract': 'urd+eng',
+            'easyocr': ['ur', 'en'],
+            'script': 'Arabic'
+        },
+        'sa': {
+            'name': 'Sanskrit',
+            'tesseract': 'san+eng',
+            'easyocr': ['hi', 'en'],  # EasyOCR doesn't have Sanskrit, use Hindi (same Devanagari script)
+            'script': 'Devanagari'
+        },
+        'ne': {
+            'name': 'Nepali',
+            'tesseract': 'nep+eng',
+            'easyocr': ['ne', 'en'],
+            'script': 'Devanagari'
+        },
+        'en': {
+            'name': 'English',
+            'tesseract': 'eng',
+            'easyocr': ['en'],
+            'script': 'Latin'
+        }
+    }
+
+    # Script-to-Language mapping for fallback
+    # When language detection fails, use script detection to choose best OCR
+    SCRIPT_TO_LANGUAGE_MAP = {
+        'Devanagari (Hindi/Marathi/Sanskrit)': 'hi',  # Hindi has best Devanagari support
+        'Bengali/Assamese': 'bn',                      # Bengali OCR works for Assamese
+        'Kannada': 'kn',
+        'Tamil': 'ta',
+        'Telugu': 'te',
+        'Gujarati': 'gu',
+        'Malayalam': 'ml',
+        'Gurmukhi (Punjabi)': 'pa',
+        'Odia': 'or',
+        'Other Indian scripts': 'hi'  # Default to Hindi for unknown scripts
+    }
+
+    # Default fallback if language not detected
+    DEFAULT_LANGUAGE = 'hi'  # Hindi as default for Indian documents
     
     @classmethod
     def get_easyocr_reader(cls, languages=['hi', 'en']):
@@ -75,46 +200,252 @@ class PDFExtractor:
                 return None
         
         return cls._easyocr_reader
-    
+
     @staticmethod
-    def extract_text(
-        pdf_bytes: bytes, 
-        num_pages: int = 3,
-        ocr_languages: str = "hin+eng"  # Hindi first, then English for better Hindi detection
+    def detect_language(text: str) -> str:
+        """
+        Detect the primary language of the text using langdetect
+
+        Args:
+            text: Text to analyze (should have at least 50 chars for accurate detection)
+
+        Returns:
+            Language code (e.g., 'hi', 'en', 'kn', 'ta') or DEFAULT_LANGUAGE if detection fails
+        """
+        if not LANGDETECT_AVAILABLE:
+            logger.warning("langdetect not available, using default language: Hindi")
+            return PDFExtractor.DEFAULT_LANGUAGE
+
+        if not text or len(text.strip()) < 20:
+            logger.warning(f"Text too short for language detection ({len(text)} chars), using default: Hindi")
+            return PDFExtractor.DEFAULT_LANGUAGE
+
+        try:
+            # Use first 1000 chars for faster detection
+            sample = text[:1000]
+            detected_lang = detect(sample)
+
+            # Return the detected language (even if not in our map)
+            # Caller will decide whether to use script fallback
+            if detected_lang in PDFExtractor.OCR_LANGUAGE_MAP:
+                lang_info = PDFExtractor.OCR_LANGUAGE_MAP[detected_lang]
+                logger.info(f"🌐 Detected language: {lang_info['name']} ({detected_lang}), Script: {lang_info['script']}")
+            else:
+                logger.info(f"🌐 Detected language: '{detected_lang}' (not in OCR map, will attempt script fallback)")
+
+            return detected_lang
+
+        except Exception as e:
+            logger.warning(f"Language detection failed: {e}, will try script-based detection")
+            return PDFExtractor.DEFAULT_LANGUAGE
+
+    @staticmethod
+    def detect_language_by_script(text: str) -> str:
+        """
+        Fallback language detection using script analysis
+        When language detection fails or returns unsupported language,
+        detect the script and map to best-supported language for that script
+
+        Args:
+            text: Text to analyze
+
+        Returns:
+            Language code based on detected script
+        """
+        if not text or len(text.strip()) < 20:
+            logger.warning("Text too short for script detection, using default: Hindi")
+            return PDFExtractor.DEFAULT_LANGUAGE
+
+        # Use the script detection from ai_tagger
+        from app.services.ai_tagger import AITagger
+        tagger = AITagger.__new__(AITagger)  # Create instance without __init__
+        scripts_found = tagger._detect_indian_scripts(text)
+
+        if not scripts_found:
+            logger.info("No Indian scripts detected, using default: Hindi")
+            return PDFExtractor.DEFAULT_LANGUAGE
+
+        # Get the most prominent script (highest character count)
+        primary_script = max(scripts_found.items(), key=lambda x: x[1])[0]
+        char_count = scripts_found[primary_script]
+
+        # Map script to best language
+        fallback_lang = PDFExtractor.SCRIPT_TO_LANGUAGE_MAP.get(primary_script, PDFExtractor.DEFAULT_LANGUAGE)
+
+        lang_info = PDFExtractor.OCR_LANGUAGE_MAP.get(fallback_lang)
+        logger.info(
+            f"📝 Script-based detection: {primary_script} ({char_count} chars) → "
+            f"Using {lang_info['name']} OCR"
+        )
+
+        return fallback_lang
+
+    @staticmethod
+    def assess_document_quality(
+        text: str,
+        page_count: int,
+        ocr_confidence: Optional[float] = None
     ) -> Dict[str, Any]:
         """
-        Extract text from PDF with automatic OCR fallback
-        
+        Assess document quality to determine optimal OCR strategy
+
+        Args:
+            text: Extracted text
+            page_count: Number of pages in document
+            ocr_confidence: OCR confidence score if available
+
+        Returns:
+            dict with quality metrics and recommendations
+        """
+        text_length = len(text.strip())
+        chars_per_page = text_length / page_count if page_count > 0 else 0
+
+        # Determine document type
+        is_scanned = chars_per_page < PDFExtractor.SCANNED_THRESHOLD_CHARS_PER_PAGE
+
+        # Determine quality tier based on multiple factors
+        if not is_scanned:
+            # Digital document - high quality
+            quality_tier = 'high'
+            recommended_engine = 'pypdf2'
+        elif ocr_confidence is not None:
+            # Scanned document with confidence score
+            if ocr_confidence >= 80:
+                quality_tier = 'high'
+                recommended_engine = 'tesseract'
+            elif ocr_confidence >= 60:
+                quality_tier = 'medium'
+                recommended_engine = 'tesseract'
+            else:
+                quality_tier = 'low'
+                recommended_engine = 'easyocr'
+        else:
+            # Scanned document without confidence - assume medium
+            quality_tier = 'medium'
+            recommended_engine = 'tesseract'
+
+        quality_info = {
+            'type': 'digital' if not is_scanned else 'scanned',
+            'text_density': round(chars_per_page, 2),
+            'ocr_confidence': round(ocr_confidence, 2) if ocr_confidence else None,
+            'quality_tier': quality_tier,
+            'recommended_engine': recommended_engine,
+            'is_scanned': is_scanned
+        }
+
+        logger.info(
+            f"📊 Quality Assessment: Type={quality_info['type']}, "
+            f"Density={quality_info['text_density']} chars/page, "
+            f"Tier={quality_tier}, Engine={recommended_engine}"
+        )
+
+        return quality_info
+
+    @staticmethod
+    def get_ocr_config(detected_language: str) -> Dict[str, Any]:
+        """
+        Get optimal OCR configuration for detected language
+
+        Args:
+            detected_language: Language code from detect_language()
+
+        Returns:
+            dict with tesseract and easyocr configurations
+        """
+        lang_config = PDFExtractor.OCR_LANGUAGE_MAP.get(
+            detected_language,
+            PDFExtractor.OCR_LANGUAGE_MAP[PDFExtractor.DEFAULT_LANGUAGE]
+        )
+
+        logger.info(
+            f"🔧 OCR Config for {lang_config['name']}: "
+            f"Tesseract='{lang_config['tesseract']}', "
+            f"EasyOCR={lang_config['easyocr']}"
+        )
+
+        return lang_config
+
+    @staticmethod
+    def extract_text(
+        pdf_bytes: bytes,
+        num_pages: int = 3,
+        ocr_languages: str = None  # Auto-detected if None
+    ) -> Dict[str, Any]:
+        """
+        Extract text from PDF with automatic OCR fallback and language detection
+
         Args:
             pdf_bytes: PDF file as bytes
             num_pages: Number of pages to extract (default 3)
-            ocr_languages: Tesseract language codes (default: hin+eng for Hindi priority)
-            
+            ocr_languages: Tesseract language codes (auto-detected if None)
+
         Returns:
-            dict with extracted_text, page_count, title, and OCR metadata
+            dict with extracted_text, page_count, title, OCR metadata, detected_language, and quality_info
         """
         try:
             # Step 1: Try PyPDF2 first (fast path)
             pypdf_result = PDFExtractor._extract_with_pypdf(pdf_bytes, num_pages)
-            
+
             if not pypdf_result["success"]:
                 return pypdf_result
-            
+
             # Step 2: Check if we got enough text (detect if scanned)
             text_length = len(pypdf_result["extracted_text"].strip())
             pages_extracted = pypdf_result["pages_extracted"]
+            page_count = pypdf_result["page_count"]
             avg_chars_per_page = text_length / pages_extracted if pages_extracted > 0 else 0
-            
+
             is_scanned = avg_chars_per_page < PDFExtractor.SCANNED_THRESHOLD_CHARS_PER_PAGE
-            
+
             logger.info(f"PyPDF2 extracted {text_length} chars from {pages_extracted} pages "
                        f"(avg: {avg_chars_per_page:.1f} chars/page). Scanned: {is_scanned}")
+
+            # Step 2.5: Intelligent language detection with script-based fallback
+            detected_language = PDFExtractor.DEFAULT_LANGUAGE
+            detection_method = "default"
+
+            if text_length > 20:
+                # First attempt: Language detection
+                detected_language = PDFExtractor.detect_language(pypdf_result["extracted_text"])
+                detection_method = "language_detection"
+
+                # If language not in our map, try script-based fallback
+                if detected_language not in PDFExtractor.OCR_LANGUAGE_MAP:
+                    logger.warning(
+                        f"⚠️ Language '{detected_language}' not fully supported. "
+                        f"Using script-based fallback..."
+                    )
+                    detected_language = PDFExtractor.detect_language_by_script(
+                        pypdf_result["extracted_text"]
+                    )
+                    detection_method = "script_fallback"
+            else:
+                logger.info(f"Text too short for language detection, using default: Hindi")
+
+            # Get OCR configuration for detected language
+            ocr_config = PDFExtractor.get_ocr_config(detected_language)
+            logger.info(f"🎯 Final language choice: {ocr_config['name']} (method: {detection_method})")
+
+            # Override with user-specified languages if provided
+            if ocr_languages is None:
+                ocr_languages = ocr_config['tesseract']
+            else:
+                logger.info(f"Using user-specified OCR languages: {ocr_languages}")
             
-            # Step 3: If not scanned, return PyPDF2 results
+            # Step 3: If not scanned, return PyPDF2 results with language and quality info
             if not is_scanned:
+                quality_info = PDFExtractor.assess_document_quality(
+                    pypdf_result["extracted_text"],
+                    page_count,
+                    ocr_confidence=None
+                )
                 pypdf_result["is_scanned"] = False
                 pypdf_result["extraction_method"] = "pypdf2"
                 pypdf_result["ocr_confidence"] = None
+                pypdf_result["detected_language"] = detected_language
+                pypdf_result["language_name"] = ocr_config['name']
+                pypdf_result["detection_method"] = detection_method
+                pypdf_result["quality_info"] = quality_info
                 return pypdf_result
             
             # Step 4: If scanned, try OCR fallback (Tesseract first, then EasyOCR if needed)
@@ -128,26 +459,37 @@ class PDFExtractor:
                 pypdf_result["error"] = "Document is scanned but OCR libraries not installed"
                 return pypdf_result
             
-            # Try Tesseract first (faster)
+            # Try Tesseract first (faster) with detected language
             tesseract_result = PDFExtractor._extract_with_ocr(
-                pdf_bytes, 
-                num_pages, 
-                ocr_languages
+                pdf_bytes,
+                num_pages,
+                ocr_languages,
+                detected_language
             )
-            
+
             # Check if Tesseract was successful and had good confidence
             if tesseract_result["success"]:
                 tesseract_confidence = tesseract_result.get("ocr_confidence", 0)
                 tesseract_text_length = len(tesseract_result.get("extracted_text", "").strip())
-                
+
                 logger.info(f"Tesseract OCR completed. Confidence: {tesseract_confidence}%, Text length: {tesseract_text_length}")
-                
+
                 # If Tesseract confidence is good, use it
                 if tesseract_confidence >= PDFExtractor.TESSERACT_CONFIDENCE_THRESHOLD and tesseract_text_length > 100:
                     logger.info(f"Using Tesseract result (good confidence: {tesseract_confidence}%)")
                     # Use better title from PyPDF2 if available
                     if pypdf_result["title"] != "Untitled Document":
                         tesseract_result["title"] = pypdf_result["title"]
+                    # Add language and quality info
+                    tesseract_result["detected_language"] = detected_language
+                    tesseract_result["language_name"] = ocr_config['name']
+                    tesseract_result["detection_method"] = detection_method
+                    quality_info = PDFExtractor.assess_document_quality(
+                        tesseract_result["extracted_text"],
+                        page_count,
+                        tesseract_confidence
+                    )
+                    tesseract_result["quality_info"] = quality_info
                     return tesseract_result
                 
                 # If Tesseract confidence is low, try EasyOCR for better accuracy
@@ -155,11 +497,17 @@ class PDFExtractor:
             else:
                 logger.warning("🔄 Tesseract OCR failed. Trying EasyOCR...")
             
-            # Step 5: Try EasyOCR as fallback or for better accuracy
+            # Step 5: Try EasyOCR as fallback or for better accuracy with detected language
             logger.info(f"🔍 Checking EasyOCR availability: {EASYOCR_AVAILABLE}")
             if EASYOCR_AVAILABLE:
                 logger.info("✅ EasyOCR is available. Starting EasyOCR extraction...")
-                easyocr_result = PDFExtractor._extract_with_easyocr(pdf_bytes, num_pages)
+                easyocr_languages = ocr_config['easyocr']
+                easyocr_result = PDFExtractor._extract_with_easyocr(
+                    pdf_bytes,
+                    num_pages,
+                    easyocr_languages,
+                    detected_language
+                )
                 
                 if easyocr_result["success"]:
                     easyocr_text_length = len(easyocr_result.get("extracted_text", "").strip())
@@ -177,12 +525,31 @@ class PDFExtractor:
                                           f"EasyOCR: {easyocr_text_length} chars, {easyocr_confidence}% confidence)")
                                 if pypdf_result["title"] != "Untitled Document":
                                     easyocr_result["title"] = pypdf_result["title"]
+                                # Add language and quality info
+                                easyocr_result["detected_language"] = detected_language
+                                easyocr_result["language_name"] = ocr_config['name']
+                                easyocr_result["detection_method"] = detection_method
+                                quality_info = PDFExtractor.assess_document_quality(
+                                    easyocr_result["extracted_text"],
+                                    page_count,
+                                    easyocr_confidence
+                                )
+                                easyocr_result["quality_info"] = quality_info
                                 return easyocr_result
                             else:
                                 logger.warning(f"EasyOCR extracted too little text ({easyocr_text_length} vs {tesseract_text_length}). "
                                              f"Using Tesseract despite low confidence ({tesseract_confidence}%)")
                                 if pypdf_result["title"] != "Untitled Document":
                                     tesseract_result["title"] = pypdf_result["title"]
+                                tesseract_result["detected_language"] = detected_language
+                                tesseract_result["language_name"] = ocr_config['name']
+                                tesseract_result["detection_method"] = detection_method
+                                quality_info = PDFExtractor.assess_document_quality(
+                                    tesseract_result["extracted_text"],
+                                    page_count,
+                                    tesseract_confidence
+                                )
+                                tesseract_result["quality_info"] = quality_info
                                 return tesseract_result
                         else:
                             # Tesseract confidence is good, compare text lengths
@@ -190,17 +557,44 @@ class PDFExtractor:
                                 logger.info(f"Using EasyOCR result (extracted {easyocr_text_length} chars vs Tesseract {tesseract_text_length})")
                                 if pypdf_result["title"] != "Untitled Document":
                                     easyocr_result["title"] = pypdf_result["title"]
+                                easyocr_result["detected_language"] = detected_language
+                                easyocr_result["language_name"] = ocr_config['name']
+                                easyocr_result["detection_method"] = detection_method
+                                quality_info = PDFExtractor.assess_document_quality(
+                                    easyocr_result["extracted_text"],
+                                    page_count,
+                                    easyocr_confidence
+                                )
+                                easyocr_result["quality_info"] = quality_info
                                 return easyocr_result
                             else:
                                 logger.info(f"Using Tesseract result (better than EasyOCR: {tesseract_text_length} vs {easyocr_text_length} chars)")
                                 if pypdf_result["title"] != "Untitled Document":
                                     tesseract_result["title"] = pypdf_result["title"]
+                                tesseract_result["detected_language"] = detected_language
+                                tesseract_result["language_name"] = ocr_config['name']
+                                tesseract_result["detection_method"] = detection_method
+                                quality_info = PDFExtractor.assess_document_quality(
+                                    tesseract_result["extracted_text"],
+                                    page_count,
+                                    tesseract_confidence
+                                )
+                                tesseract_result["quality_info"] = quality_info
                                 return tesseract_result
                     else:
                         # Tesseract failed, use EasyOCR
                         logger.info("Using EasyOCR result (Tesseract failed)")
                         if pypdf_result["title"] != "Untitled Document":
                             easyocr_result["title"] = pypdf_result["title"]
+                        easyocr_result["detected_language"] = detected_language
+                        easyocr_result["language_name"] = ocr_config['name']
+                        easyocr_result["detection_method"] = detection_method
+                        quality_info = PDFExtractor.assess_document_quality(
+                            easyocr_result["extracted_text"],
+                            page_count,
+                            easyocr_confidence
+                        )
+                        easyocr_result["quality_info"] = quality_info
                         return easyocr_result
             else:
                 logger.warning("❌ EasyOCR not available. Install with: pip install easyocr torch torchvision")
@@ -210,6 +604,16 @@ class PDFExtractor:
                 logger.info("Using Tesseract result (EasyOCR not available or failed)")
                 if pypdf_result["title"] != "Untitled Document":
                     tesseract_result["title"] = pypdf_result["title"]
+                tesseract_result["detected_language"] = detected_language
+                tesseract_result["language_name"] = ocr_config['name']
+                tesseract_result["detection_method"] = detection_method
+                tesseract_confidence = tesseract_result.get("ocr_confidence", 0)
+                quality_info = PDFExtractor.assess_document_quality(
+                    tesseract_result["extracted_text"],
+                    page_count,
+                    tesseract_confidence
+                )
+                tesseract_result["quality_info"] = quality_info
                 return tesseract_result
             
             # Last resort: return PyPDF2 result with error
@@ -297,13 +701,26 @@ class PDFExtractor:
     
     @staticmethod
     def _extract_with_ocr(
-        pdf_bytes: bytes, 
-        num_pages: int, 
-        languages: str = "hin+eng"
+        pdf_bytes: bytes,
+        num_pages: int,
+        languages: str = "hin+eng",
+        detected_language: str = "hi"
     ) -> Dict[str, Any]:
-        """Extract text using Tesseract OCR (slower, for scanned PDFs)"""
+        """
+        Extract text using Tesseract OCR (slower, for scanned PDFs)
+
+        Args:
+            pdf_bytes: PDF file as bytes
+            num_pages: Number of pages to extract
+            languages: Tesseract language codes
+            detected_language: Detected language code for logging
+
+        Returns:
+            dict with extracted_text and OCR metadata
+        """
         try:
-            logger.info(f"Starting OCR extraction with languages: {languages}")
+            lang_name = PDFExtractor.OCR_LANGUAGE_MAP.get(detected_language, {}).get('name', 'Unknown')
+            logger.info(f"Starting Tesseract OCR for {lang_name} with languages: {languages}")
             
             # Convert PDF to images with optimal DPI
             # Note: Too high DPI on low-quality scans makes it worse
@@ -411,25 +828,36 @@ class PDFExtractor:
             }
     
     @staticmethod
-    def _extract_with_easyocr(pdf_bytes: bytes, num_pages: int) -> Dict[str, Any]:
+    def _extract_with_easyocr(
+        pdf_bytes: bytes,
+        num_pages: int,
+        languages: list = None,
+        detected_language: str = "hi"
+    ) -> Dict[str, Any]:
         """
         Extract text using EasyOCR (best for complex Indian languages)
-        
+
         EasyOCR supports 80+ languages including:
         - All Indian languages (Hindi, Tamil, Telugu, Bengali, Kannada, Malayalam, etc.)
         - Complex scripts and ligatures
         - Better accuracy on low-quality scans
-        
+
         Args:
             pdf_bytes: PDF file as bytes
             num_pages: Number of pages to extract
-            
+            languages: List of language codes for EasyOCR (e.g., ['hi', 'en'])
+            detected_language: Detected language code for logging
+
         Returns:
             dict with extracted_text and OCR metadata
         """
         try:
-            logger.info("Starting EasyOCR extraction...")
-            
+            if languages is None:
+                languages = ['hi', 'en']
+
+            lang_name = PDFExtractor.OCR_LANGUAGE_MAP.get(detected_language, {}).get('name', 'Unknown')
+            logger.info(f"Starting EasyOCR extraction for {lang_name} with languages: {languages}")
+
             # Convert PDF to images
             images = convert_from_bytes(
                 pdf_bytes,
@@ -437,12 +865,11 @@ class PDFExtractor:
                 last_page=num_pages,
                 dpi=300  # Optimal DPI for OCR
             )
-            
+
             logger.info(f"Converted PDF to {len(images)} images for EasyOCR")
-            
-            # Get EasyOCR reader (supports Hindi + English by default)
-            # Can be extended to support more languages: ['hi', 'ta', 'te', 'bn', 'en']
-            reader = PDFExtractor.get_easyocr_reader(['hi', 'en'])
+
+            # Get EasyOCR reader with specified languages
+            reader = PDFExtractor.get_easyocr_reader(languages)
             
             if not reader:
                 return {

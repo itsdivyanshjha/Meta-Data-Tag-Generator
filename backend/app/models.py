@@ -1,10 +1,12 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Literal, Dict, Any
 from enum import Enum
 
 
 class TaggingConfig(BaseModel):
     """Configuration for tagging operation"""
+    model_config = ConfigDict(protected_namespaces=())
+    
     api_key: str = Field(..., description="OpenRouter API key")
     model_name: str = Field(default="openai/gpt-4o-mini", description="AI model to use")
     num_pages: int = Field(default=3, ge=1, le=10, description="Number of PDF pages to extract")

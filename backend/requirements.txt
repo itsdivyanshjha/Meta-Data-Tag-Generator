@@ -1,25 +1,37 @@
-fastapi>=0.100.0
-uvicorn[standard]>=0.23.0
-python-multipart>=0.0.6
-PyPDF2>=3.0.0
-openai>=1.0.0
-boto3>=1.28.0
-requests>=2.31.0
-pandas>=1.5.0
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
-python-dotenv>=1.0.0
+# Core Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+pydantic==2.5.0
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+
+# API & Data Processing
+openai>=1.12.0
+boto3==1.29.0
+requests==2.31.0
+pandas==2.0.3
 
 # WebSocket support
-websockets>=12.0
-aiofiles>=23.2.1
+websockets==12.0
+aiofiles==23.2.1
 
-# OCR Dependencies - Tesseract (fast, good for Hindi)
-pytesseract>=0.3.10
-pdf2image>=1.16.3
-Pillow>=10.0.0
+# PDF Processing
+PyPDF2==3.0.1
+pdf2image==1.16.3
+Pillow==10.1.0
+pytesseract==0.3.10
 
-# OCR Dependencies - EasyOCR (enhanced Indian languages support)
-easyocr>=1.7.0
-torch>=2.0.0
-torchvision>=0.15.0
+# CRITICAL: NumPy must be installed BEFORE opencv and torch
+# NumPy 2.x breaks compatibility with OCR libraries
+numpy==1.24.3
+
+# Computer Vision & OCR (order matters!)
+opencv-python==4.8.1.78
+torch==2.0.1
+torchvision==0.15.2
+easyocr==1.7.0
+
+# Language Detection & Encoding
+langdetect==1.0.9
+chardet==5.2.0
