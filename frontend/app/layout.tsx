@@ -8,8 +8,8 @@ const ibmPlexSans = IBM_Plex_Sans({
 })
 
 export const metadata: Metadata = {
-  title: 'Document Tagger',
-  description: 'AI-powered document tagging',
+  title: 'MetaDataTagger',
+  description: 'AI-powered document metadata tagging solution',
 }
 
 export default function RootLayout({

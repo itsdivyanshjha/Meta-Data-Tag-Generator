@@ -436,6 +436,62 @@ OUTPUT FORMAT: comma-separated tags only, nothing else"""
 
         return text
     
+    def _detect_document_type(self, title: str, description: str, content: str) -> str:
+        """
+        Detect document type from content for specialized prompting
+        
+        Returns document type: annual_report, budget, scheme, newsletter, legal, tender, policy, or general
+        """
+        combined = f"{title} {description} {content[:800]}".lower()
+        
+        # Check for specific document types (order matters - more specific first)
+        type_patterns = {
+            'annual_report': ['annual report', 'yearly report', 'financial year', 'fy 20', 'year in review', 'वार्षिक रिपोर्ट'],
+            'budget': ['budget', 'allocation', 'expenditure', 'appropriation', 'बजट', 'आवंटन'],
+            'scheme': ['scheme', 'yojana', 'eligibility', 'application process', 'benefits', 'योजना'],
+            'newsletter': ['newsletter', 'monthly', 'quarterly', 'bulletin', 'समाचार पत्र'],
+            'legal': ['act', 'rules', 'notification', 'gazette', 'section', 'clause', 'अधिनियम'],
+            'tender': ['tender', 'bid', 'procurement', 'quotation', 'निविदा'],
+            'policy': ['policy', 'framework', 'guidelines', 'norms', 'नीति']
+        }
+        
+        for doc_type, keywords in type_patterns.items():
+            if any(kw in combined for kw in keywords):
+                logger.info(f"📄 Detected document type: {doc_type}")
+                return doc_type
+        
+        logger.info(f"📄 Document type: general (no specific pattern matched)")
+        return 'general'
+    
+    def _get_document_type_guidance(self, doc_type: str) -> str:
+        """Return focused tagging guidance based on document type"""
+        guidance = {
+            'annual_report': 'FOCUS: organization name, year/period, key programs, achievements, beneficiary counts, schemes implemented',
+            'budget': 'FOCUS: budget heads, ministry/department, financial year, major schemes, allocation categories, expenditure types',
+            'scheme': 'FOCUS: scheme name/acronym, beneficiary type, eligibility criteria, benefits offered, implementing agency',
+            'newsletter': 'FOCUS: period (month/quarter), events covered, announcements, activities, celebrations',
+            'legal': 'FOCUS: act name, notification number, sections, amendment year, jurisdiction',
+            'tender': 'FOCUS: tender number, procurement type, department, deadline date, item/service category',
+            'policy': 'FOCUS: policy name, ministry, implementation date, target beneficiaries, key provisions',
+            'general': 'FOCUS: main entities, key topics, time periods, specific programs/initiatives mentioned'
+        }
+        return guidance.get(doc_type, guidance['general'])
+    
+    def _get_quality_adjusted_instruction(self, quality_info: Optional[Dict[str, Any]]) -> str:
+        """Adjust extraction instructions based on document quality"""
+        if not quality_info:
+            return ""
+        
+        quality_tier = quality_info.get('quality_tier', 'medium')
+        doc_type = quality_info.get('type', 'unknown')
+        
+        if quality_tier == 'low':
+            return "\n⚠️ LOW QUALITY SCAN - Extract only clearly readable terms and obvious entities. Prioritize unambiguous words."
+        elif quality_tier == 'medium' and doc_type == 'scanned':
+            return "\n📄 SCANNED DOCUMENT - Focus on clearly extracted text. Verify entities and dates are accurate."
+        else:
+            return ""  # High quality - no special instruction needed
+    
     def _build_prompt(
         self,
         title: str,
@@ -447,150 +503,75 @@ OUTPUT FORMAT: comma-separated tags only, nothing else"""
         quality_info: Optional[Dict[str, Any]] = None
     ) -> str:
         """
-        Build prompt for AI with language awareness and exclusion guidance
-
-        Args:
-            title: Document title
-            description: Document description
-            content: Document content
-            num_tags: Number of tags to request
-            detected_language: Language code (e.g., 'hi', 'kn')
-            language_name: Full language name (e.g., 'Hindi', 'Kannada')
-            quality_info: Quality metrics from PDF extractor
-
-        Returns:
-            Formatted prompt string
+        Build optimized prompt - 60% shorter, more effective, document-type aware
+        
+        Key improvements:
+        - Document type detection for specialized prompting
+        - Quality-aware instructions
+        - Positive framing (show good examples, not bad)
+        - Clear hierarchy (TASK → RULES → EXAMPLES)
+        - Removed repetition
         """
-        # Sanitize inputs to handle Unicode properly
+        # Sanitize inputs
         title = self._sanitize_text_for_api(title)
         description = self._sanitize_text_for_api(description)
         content = self._sanitize_text_for_api(content)
-
-        # Truncate content if too long (increased from 1500 to 2000 for better context)
-        content_preview = content[:2000] if len(content) > 2000 else content
-
-        # Build language context string
-        language_context = ""
-        if language_name and detected_language:
-            language_context = f"\n**DETECTED LANGUAGE**: {language_name} ({detected_language})"
-            if detected_language != 'en':
-                language_context += f"\nNote: This document is primarily in {language_name}. Focus on extracting domain-specific concepts and translating them to English tags."
-
-        # Build quality context string
-        quality_context = ""
-        if quality_info:
-            quality_tier = quality_info.get('quality_tier', 'unknown')
-            doc_type = quality_info.get('type', 'unknown')
-            quality_context = f"\n**DOCUMENT QUALITY**: {quality_tier} quality {doc_type} document"
         
-        # Add exclusion guidance if we have an exclusion list
-        exclusion_guidance = ""
+        # Detect document type for targeted prompting
+        doc_type = self._detect_document_type(title, description, content)
+        type_guidance = self._get_document_type_guidance(doc_type)
+        
+        # Truncate content intelligently
+        content_preview = content[:1800] if len(content) > 1800 else content
+        
+        # Build language context (concise)
+        language_hint = ""
+        if language_name and detected_language != 'en':
+            language_hint = f" [Document in {language_name} - translate key terms to English]"
+        
+        # Quality-based adjustments
+        quality_hint = self._get_quality_adjusted_instruction(quality_info)
+        
+        # Exclusion list (show first 10, not 15 - save tokens)
+        exclusion_hint = ""
         if self.exclusion_words:
-            sample_excluded = list(self.exclusion_words)[:15]  # Show first 15 as examples
-            exclusion_guidance = f"""
-⚠️ EXCLUDED TERMS - DO NOT USE THESE IN YOUR TAGS:
-The following common/generic terms should be AVOIDED:
-{', '.join(sample_excluded)}
-{f'... and {len(self.exclusion_words) - 15} more excluded terms' if len(self.exclusion_words) > 15 else ''}
-
-Generate tags that are SPECIFIC and UNIQUE to this document, avoiding all these common terms.
-"""
+            sample_excluded = list(self.exclusion_words)[:10]
+            exclusion_hint = f"\n❌ AVOID: {', '.join(sample_excluded)}" + \
+                           (f" + {len(self.exclusion_words) - 10} more" if len(self.exclusion_words) > 10 else "")
         
-        prompt = f"""You are analyzing an Indian government/organizational document.
-{language_context}{quality_context}
+        # BUILD OPTIMIZED PROMPT (60% shorter)
+        prompt = f"""Generate {num_tags} precise English metadata tags for this document.{language_hint}{quality_hint}
 
-Your task: Generate exactly {num_tags} HIGHLY SPECIFIC and UNIQUE meta-data tags in ENGLISH ONLY (translate concepts from any language to English).
-{exclusion_guidance}
-
-**DOCUMENT INFORMATION**:
+DOCUMENT:
 Title: {title}
-Description: {description if description else 'N/A'}
+{f'Description: {description}' if description else ''}
 
-**CONTENT PREVIEW**:
+Content:
 {content_preview}
 
-CRITICAL RULES - READ CAREFULLY:
+TAGGING STRATEGY:
+{type_guidance}{exclusion_hint}
 
-🚫 NEVER USE THESE GENERIC/USELESS TAGS:
-- Structural info: "contact-details", "phone-number", "email", "address"
-- Document metadata: "hindi-document", "publication", "document", "pdf"
-- Generic descriptors: "government", "ministry", "department", "foundation" (alone, without specifics)
-- Vague terms: "social-welfare", "empowerment", "development" (too broad)
-- Long phrases: "dr ambedkar foundation annual report 2015" (BREAK INTO SEPARATE TAGS!)
+RULES:
+1. LENGTH: 1-3 words max, hyphenated (e.g., "annual-report-2015", "sc-welfare")
+2. SPECIFICITY: Extract entities, programs, dates, locations - NOT generic descriptors
+3. SEARCHABLE: Each tag = a keyword someone would search
+4. ENGLISH ONLY: Translate non-English concepts
 
-✅ TAG LENGTH REQUIREMENTS:
-- 1 word: "scholarship", "census", "budget", "employment" ✓
-- 2 words: "sc-welfare", "annual-report", "skill-training" ✓
-- 3 words: "budget-allocation-2015", "sc-student-scholarship" ✓
-- 4+ words: "dr ambedkar foundation annual report" ✗ TOO LONG - SPLIT IT!
+GOOD EXAMPLES by category:
+• Entities: "ambedkar-foundation", "ncsc", "ministry-social-justice"
+• Programs: "pmkvy", "post-matric-scholarship", "skill-training" 
+• Doc type: "annual-report-2015", "budget-2024-25", "newsletter-q4"
+• Beneficiaries: "sc-students", "obc-artisans", "divyang-persons"
+• Topics: "legal-aid", "employment-generation", "grievance-redressal"
+• Events: "ravidas-jayanti-2016", "awareness-campaign-march"
 
-RULE: If you're writing 4+ words, you're writing a PHRASE not a TAG.
-Split it: "dr ambedkar foundation annual report 2015" → ["ambedkar-foundation", "annual-report-2015"]
+NEVER USE:
+• Generic terms: "government", "ministry", "document", "contact"
+• Metadata: "hindi-document", "pdf", "publication"
+• Long phrases: "dr ambedkar foundation annual report" → SPLIT to ["ambedkar-foundation", "annual-report-2015"]
 
-✅ GENERATE TAGS FROM THESE CATEGORIES:
-
-1. ENTITIES (organizations, people, places):
-   ✅ "ambedkar-foundation", "ncsc", "delhi-office", "ministry-social-justice"
-   ❌ "dr ambedkar foundation" (too long - use "ambedkar-foundation")
-
-2. PROGRAMS/SCHEMES (use abbreviations or short names):
-   ✅ "pmkvy", "post-matric-scholarship", "skill-development", "rojgar-yojana"
-   ❌ "pradhan mantri kaushal vikas yojana" (use "pmkvy" or "kaushal-vikas")
-
-3. DOCUMENT TYPE (include year if relevant):
-   ✅ "annual-report-2015", "newsletter-q4", "budget-document", "guidelines"
-   ❌ "quarterly newsletter december 2023" (too long - use "newsletter-dec-2023")
-
-4. BENEFICIARIES (target groups):
-   ✅ "sc-students", "obc-artisans", "divyang-students", "sc-entrepreneurs"
-   ❌ "scheduled caste students in higher education" (too long)
-
-5. TOPICS/THEMES (key subjects):
-   ✅ "legal-aid", "employment-generation", "grievance-redressal", "skill-training"
-   ❌ "legal aid clinics for marginalized communities" (too descriptive)
-
-6. EVENTS/ACTIVITIES:
-   ✅ "ravidas-jayanti-2016", "workshop-2023", "awareness-campaign"
-   ❌ "sant ravidas jayanti celebration 2016" (too long - use "ravidas-jayanti-2016")
-
-7. TIME REFERENCES (attach to relevant tags):
-   ✅ "budget-2015-16", "q4-2023", "february-2016"
-   ❌ "february 2016 activities" (too long - use "activities-feb-2016")
-
-QUALITY CHECK - Each tag must pass ALL tests:
-✓ CONCISE: 1-3 words maximum (use hyphens for multi-word)
-✓ SEARCHABLE: Would someone search for this exact keyword?
-✓ UNIQUE: Does it distinguish this document from others?
-✓ MEANINGFUL: Does it describe content, not format?
-✓ ATOMIC: Represents ONE concept/entity
-
-If a tag has 4+ words, it FAILS - split into multiple tags.
-
-BAD EXAMPLE TAGS (NEVER do this):
-{{"contact-details", "hindi-document", "government-organization", "dr ambedkar foundation annual report 2015", "social justice ministry schemes overview", "scheduled caste welfare budget allocation details"}}
- ↑ generic          ↑ metadata        ↑ too vague                ↑ WAY TOO LONG (7 words!)             ↑ TOO LONG (5 words)                     ↑ TOO LONG (6 words)
-
-GOOD EXAMPLE TAGS (ALWAYS do this):
-{{"ambedkar-foundation", "annual-report-2015", "sc-welfare-budget", "backward-classes", "pmkvy", "kaushal-vikas", "post-matric-scholarship", "ravidas-jayanti-2016", "ncsc-grievances", "legal-aid-camps", "skill-training", "employment-schemes"}}
- ↑ 2 words          ↑ 3 words with date ↑ 3 words specific    ↑ 2 words       ↑ abbreviation ↑ 2 words      ↑ 3 words specific        ↑ 3 words with date   ↑ 2 words        ↑ 3 words         ↑ 2 words       ↑ 2 words
-
-NOW GENERATE {num_tags} TAGS FOR THIS DOCUMENT:
-- Each tag MUST be 1-3 words maximum (use hyphens for multi-word)
-- Each tag MUST be specific and searchable
-- NO generic terms like "contact-details", "hindi-document", "government"
-- NO long phrases - if it's 4+ words, SPLIT IT into separate tags
-- Focus on WHAT the document contains, not document metadata
-- Use abbreviations or short names for programs (e.g., "pmkvy" not "pradhan mantri kaushal vikas yojana")
-- Include year/date context where relevant (e.g., "report-2015", "budget-2015-16")
-
-Output Format:
-- Comma-separated tags ONLY
-- Lowercase English with hyphens for multi-word tags
-- EXACTLY {num_tags} tags (this is CRITICAL - count carefully!)
-- Each tag 1-3 words maximum
-- NO explanations, NO numbering, NO extra text
-
-Generate EXACTLY {num_tags} concise high-quality tags:"""
+OUTPUT: Exactly {num_tags} comma-separated lowercase tags. No explanations."""
         
         return prompt
     
