@@ -16,7 +16,8 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
   const [error, setError] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
-  
+  const [isFullscreen, setIsFullscreen] = useState(false)
+
   // URL input state
   const [pdfUrl, setPdfUrl] = useState<string>('')
   const [urlError, setUrlError] = useState<string | null>(null)
@@ -93,6 +94,25 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
     setIsDragging(false)
   }, [])
 
+  // Fullscreen modal handlers
+  const openFullscreen = () => setIsFullscreen(true)
+  const closeFullscreen = () => setIsFullscreen(false)
+
+  // ESC key to close fullscreen
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    if (e.key === 'Escape' && isFullscreen) {
+      closeFullscreen()
+    }
+  }, [isFullscreen])
+
+  // Add ESC key listener
+  useState(() => {
+    if (typeof window !== 'undefined') {
+      window.addEventListener('keydown', handleKeyDown)
+      return () => window.removeEventListener('keydown', handleKeyDown)
+    }
+  })
+
   const handleSubmit = async () => {
     // Validate input
     if (!file && !pdfUrl) {
@@ -168,9 +188,37 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB'
   }
 
+  // Categorize tags for color-coding
+  const getTagCategory = (tag: string): string => {
+    const lower = tag.toLowerCase()
+
+    // Date patterns (years, months, quarters)
+    if (/\d{4}|\d{2}-\d{2}|q\d|january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec/i.test(lower)) {
+      return 'tag-date'
+    }
+
+    // Program/Scheme patterns
+    if (/(scheme|yojana|program|initiative|mission|project|pmkvy|scholarship)/i.test(lower)) {
+      return 'tag-program'
+    }
+
+    // Location patterns
+    if (/(delhi|mumbai|bangalore|india|state|district|city|office)/i.test(lower)) {
+      return 'tag-location'
+    }
+
+    // Document type patterns
+    if (/(report|newsletter|document|circular|notification|guidelines|manual|policy|budget)/i.test(lower)) {
+      return 'tag-document'
+    }
+
+    // Entity/Organization (default)
+    return 'tag-entity'
+  }
+
   return (
-    <div className="space-y-6">
-      <div className="card p-6 space-y-4">
+    <div className="space-y-8">
+      <div className="card p-8 space-y-5">
         <div className="border-b border-gray-200 pb-3">
           <div className="flex items-center justify-between">
             <div>
@@ -320,13 +368,36 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
         )}
       </div>
 
-      {/* PDF Preview - Increased height */}
+      {/* PDF Preview with Fullscreen */}
       {previewUrl && (
-        <div className="card p-4">
-          <h3 className="text-sm font-medium text-gray-700 mb-3">PDF Preview</h3>
-          <div className="border border-gray-300 rounded overflow-hidden" style={{ height: '600px' }}>
-            <iframe 
-              src={previewUrl} 
+        <div className="card p-8">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-base font-semibold text-gray-900">PDF Preview</h3>
+            <button
+              onClick={openFullscreen}
+              className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+              title="Open fullscreen"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className="h-4 w-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"
+                />
+              </svg>
+              Fullscreen
+            </button>
+          </div>
+          <div className="border border-gray-200 rounded-lg overflow-hidden shadow-sm" style={{ height: '800px' }}>
+            <iframe
+              src={previewUrl}
               className="w-full h-full"
               title="PDF Preview"
             />
@@ -334,41 +405,110 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
         </div>
       )}
 
+      {/* Enhanced Fullscreen PDF Modal */}
+      {isFullscreen && previewUrl && (
+        <div
+          className="fixed inset-0 z-50 bg-black bg-opacity-95 flex flex-col animate-fadeIn"
+          onClick={closeFullscreen}
+        >
+          {/* Modal Header */}
+          <div className="flex items-center justify-between px-6 py-4 bg-gradient-to-r from-gray-900 to-gray-800 border-b border-gray-700 shadow-lg">
+            <div className="flex items-center gap-3">
+              <svg className="w-6 h-6 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              <h3 className="text-lg font-semibold text-white">Document Preview</h3>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-gray-800 rounded-lg border border-gray-600">
+                <kbd className="px-2 py-0.5 text-xs font-semibold text-gray-300 bg-gray-700 border border-gray-600 rounded">ESC</kbd>
+                <span className="text-xs text-gray-400">to close</span>
+              </div>
+
+              <button
+                onClick={closeFullscreen}
+                className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-all duration-200 shadow-md hover:shadow-lg"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  className="h-4 w-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M6 18L18 6M6 6l12 12"
+                  />
+                </svg>
+                Close
+              </button>
+            </div>
+          </div>
+
+          {/* Modal Content */}
+          <div
+            className="flex-1 p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="w-full h-full bg-white rounded-xl shadow-2xl overflow-hidden">
+              <iframe
+                src={previewUrl}
+                className="w-full h-full"
+                title="PDF Preview Fullscreen"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Results */}
       {result && (
-        <div className="card p-6 space-y-6">
+        <div className="card p-8 space-y-6">
           {/* Success Banner */}
-          <div className="p-4 bg-green-50 border border-green-200 rounded">
-            <p className="font-semibold text-green-800">✓ Tags Generated Successfully</p>
-            <p className="text-sm text-green-600">
-              Processed in {result.processing_time}s
-            </p>
+          <div className="p-5 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-xl">
+            <div className="flex items-start gap-3">
+              <div className="flex-shrink-0 w-8 h-8 bg-green-500 rounded-full flex items-center justify-center">
+                <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <p className="font-semibold text-green-900">Tags Generated Successfully</p>
+                <p className="text-sm text-green-700 mt-1">
+                  Processed in {result.processing_time}s
+                </p>
+              </div>
+            </div>
           </div>
 
           {/* Document Title */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-medium text-gray-500">Document Title</h3>
+          <div className="border-b border-gray-100 pb-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider">Document Title</h3>
               {/* OCR Status Badge */}
               {result.is_scanned !== undefined && (
-                <span className={`text-xs px-2 py-1 rounded ${
-                  result.is_scanned 
-                    ? 'bg-purple-100 text-purple-700 border border-purple-300' 
-                    : 'bg-blue-100 text-blue-700 border border-blue-300'
+                <span className={`text-xs px-3 py-1.5 rounded-full font-medium ${
+                  result.is_scanned
+                    ? 'bg-purple-100 text-purple-700 border border-purple-200'
+                    : 'bg-blue-100 text-blue-700 border border-blue-200'
                 }`}>
                   {result.is_scanned ? (
-                    <>📷 Scanned PDF{result.ocr_confidence ? ` (${result.ocr_confidence}% confidence)` : ''}</>
+                    <>Scanned PDF{result.ocr_confidence ? ` · ${result.ocr_confidence}% confidence` : ''}</>
                   ) : (
-                    <>📄 Text PDF</>
+                    <>Text PDF</>
                   )}
                 </span>
               )}
             </div>
-            <p className="text-lg font-semibold text-gray-900">{result.document_title}</p>
+            <p className="text-xl font-bold text-gray-900">{result.document_title}</p>
             {/* Extraction Method Info */}
             {result.extraction_method && (
-              <p className="text-xs text-gray-500 mt-1">
-                Extracted using: {result.extraction_method === 'pypdf2' ? 'PyPDF2' : result.extraction_method === 'tesseract_ocr' ? 'Tesseract OCR (Hindi + English)' : result.extraction_method}
+              <p className="text-sm text-gray-500 mt-2">
+                Extracted using {result.extraction_method === 'pypdf2' ? 'PyPDF2' : result.extraction_method === 'tesseract_ocr' ? 'Tesseract OCR' : result.extraction_method}
               </p>
             )}
           </div>
@@ -385,13 +525,21 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
 
           {/* Generated Tags */}
           <div>
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-medium text-gray-500">Generated Tags</h3>
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider">Generated Tags</h3>
+                {result.tags && result.tags.length > 0 && (
+                  <p className="text-sm text-gray-600 mt-1">{result.tags.length} tags generated</p>
+                )}
+              </div>
               {result.tags && result.tags.length > 0 && (
                 <button
                   onClick={copyTags}
-                  className="text-sm text-blue-600 hover:underline"
+                  className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors border border-blue-200"
                 >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
                   Copy all
                 </button>
               )}
@@ -399,14 +547,14 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
             {result.tags && result.tags.length > 0 ? (
               <div className="flex flex-wrap gap-2">
                 {result.tags.map((tag, index) => (
-                  <span key={index} className="tag-pill">
+                  <span key={index} className={`tag-pill ${getTagCategory(tag)}`}>
                     {tag}
                   </span>
                 ))}
               </div>
             ) : (
-              <div className="p-4 bg-red-50 border border-red-200 rounded">
-                <p className="text-sm text-red-700 font-semibold mb-2">⚠️ No tags were parsed from the AI response</p>
+              <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
+                <p className="text-sm text-red-700 font-semibold mb-2">No tags were parsed from the AI response</p>
                 <p className="text-xs text-red-600">Check the &quot;Raw AI Response&quot; above to see what the model returned. The parsing logic may need adjustment.</p>
               </div>
             )}
@@ -414,9 +562,9 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
 
           {/* Text Preview */}
           <div>
-            <h3 className="text-sm font-medium text-gray-500 mb-2">Extracted Text Preview</h3>
-            <div className="p-4 bg-gray-50 rounded max-h-60 overflow-y-auto border border-gray-200">
-              <p className="text-sm text-gray-700 leading-relaxed">
+            <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">Extracted Text Preview</h3>
+            <div className="p-5 bg-gradient-to-br from-gray-50 to-slate-50 rounded-xl max-h-60 overflow-y-auto border border-gray-200">
+              <p className="text-sm text-gray-700 leading-relaxed font-mono">
                 {result.extracted_text_preview}
               </p>
             </div>

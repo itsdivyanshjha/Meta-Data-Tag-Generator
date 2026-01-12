@@ -18,45 +18,122 @@ import { useBatchStore, DocumentStatus } from '@/lib/batchStore'
 // Register AG Grid modules
 ModuleRegistry.registerModules([AllCommunityModule])
 
-// Status cell renderer
+// Status cell renderer with styled badges (no emojis)
 const StatusCellRenderer = (props: any) => {
   const status: DocumentStatus = props.value
-  
+
   const statusConfig = {
-    pending: { icon: '⏳', color: 'text-gray-500', bg: 'bg-gray-100' },
-    processing: { icon: '🔄', color: 'text-blue-600', bg: 'bg-blue-100' },
-    success: { icon: '✅', color: 'text-green-600', bg: 'bg-green-100' },
-    failed: { icon: '❌', color: 'text-red-600', bg: 'bg-red-100' }
+    pending: {
+      label: 'Pending',
+      color: 'text-gray-700',
+      bg: 'bg-gray-100',
+      border: 'border-gray-300',
+      icon: (
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+      )
+    },
+    processing: {
+      label: 'Processing',
+      color: 'text-blue-700',
+      bg: 'bg-blue-100',
+      border: 'border-blue-300',
+      icon: (
+        <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+      )
+    },
+    success: {
+      label: 'Success',
+      color: 'text-green-700',
+      bg: 'bg-green-100',
+      border: 'border-green-300',
+      icon: (
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+        </svg>
+      )
+    },
+    failed: {
+      label: 'Failed',
+      color: 'text-red-700',
+      bg: 'bg-red-100',
+      border: 'border-red-300',
+      icon: (
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      )
+    }
   }
-  
+
   const config = statusConfig[status] || statusConfig.pending
-  
+
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${config.color} ${config.bg}`}>
-      <span className="mr-1">{config.icon}</span>
-      {status}
+    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border ${config.color} ${config.bg} ${config.border}`}>
+      {config.icon}
+      <span>{config.label}</span>
     </span>
   )
 }
 
-// Tags cell renderer
+// Tag categorization helper
+const getTagCategory = (tag: string): string => {
+  const lower = tag.toLowerCase()
+
+  if (/\d{4}|\d{2}-\d{2}|q\d|january|february|march|april|may|june|july|august|september|october|november|december|fy|financial year/i.test(lower)) {
+    return 'tag-date'
+  }
+
+  if (/(scheme|yojana|program|initiative|mission|project|pmkvy|scholarship|subsidy|grant)/i.test(lower)) {
+    return 'tag-program'
+  }
+
+  if (/(delhi|mumbai|bangalore|india|state|district|city|office|chennai|kolkata|hyderabad|pune)/i.test(lower)) {
+    return 'tag-location'
+  }
+
+  if (/(report|newsletter|document|circular|notification|guidelines|policy|manual|form)/i.test(lower)) {
+    return 'tag-document'
+  }
+
+  return 'tag-entity'
+}
+
+// Tags cell renderer with color coding and tooltip
 const TagsCellRenderer = (props: any) => {
   const tags: string[] = props.value || []
-  
+
   if (tags.length === 0) return <span className="text-gray-400 text-xs">—</span>
-  
+
+  const allTagsText = tags.join(', ')
+
   return (
-    <div className="flex flex-wrap gap-1 py-1">
-      {tags.slice(0, 3).map((tag, idx) => (
-        <span 
-          key={idx} 
-          className="inline-block px-1.5 py-0.5 text-xs bg-emerald-100 text-emerald-700 rounded"
+    <div
+      className="flex flex-wrap gap-1 py-1"
+      title={allTagsText}
+    >
+      {tags.slice(0, 4).map((tag, idx) => {
+        const category = getTagCategory(tag)
+        return (
+          <span
+            key={idx}
+            className={`inline-flex items-center px-2 py-0.5 text-xs font-medium rounded ${category}`}
+          >
+            {tag}
+          </span>
+        )
+      })}
+      {tags.length > 4 && (
+        <span
+          className="text-xs text-gray-600 font-medium px-1 py-0.5"
+          title={tags.slice(4).join(', ')}
         >
-          {tag}
+          +{tags.length - 4}
         </span>
-      ))}
-      {tags.length > 3 && (
-        <span className="text-xs text-gray-500">+{tags.length - 3} more</span>
       )}
     </div>
   )
@@ -91,26 +168,36 @@ const PathTypeEditor = (props: any) => {
   )
 }
 
-// Validation status cell renderer
+// Validation status cell renderer (not currently used but keeping for reference)
 const ValidationCellRenderer = (props: any) => {
   const { validationResults } = useBatchStore()
   const path = props.value
-  
+
   if (!path) return null
-  
+
   const result = validationResults[path]
-  
+
   if (!result) {
-    return <span className="text-gray-400">—</span>
+    return <span className="text-gray-400 text-xs">—</span>
   }
-  
+
   if (result.valid) {
-    return <span className="text-green-600" title="Valid">✓</span>
+    return (
+      <span className="inline-flex items-center gap-1 text-green-600 text-xs" title="Valid">
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+        </svg>
+        Valid
+      </span>
+    )
   }
-  
+
   return (
-    <span className="text-red-600" title={result.error || 'Invalid'}>
-      ⚠️
+    <span className="inline-flex items-center gap-1 text-red-600 text-xs" title={result.error || 'Invalid'}>
+      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+      {result.error || 'Invalid'}
     </span>
   )
 }
@@ -184,8 +271,8 @@ export default function SpreadsheetEditor() {
         resizable: true,
         sortable: true,
         filter: true,
-        headerClass: col.systemColumn ? 'bg-blue-50' : '',
-        cellClass: col.systemColumn ? 'bg-blue-50/30' : '',
+        headerClass: col.systemColumn ? 'font-semibold' : '',
+        cellClass: col.systemColumn ? 'border-l-2 border-l-blue-500 bg-blue-50/40 font-medium' : '',
         headerTooltip: col.systemColumn ? 'Required system column' : undefined,
       }
       
@@ -200,14 +287,20 @@ export default function SpreadsheetEditor() {
         colDef.cellRenderer = (params: any) => {
           const path = params.value
           const result = validationResults[path]
-          
+
           return (
             <div className="flex items-center gap-2">
               <span className="flex-1 truncate">{path}</span>
               {result && (
-                <span className={result.valid ? 'text-green-600' : 'text-red-600'}>
-                  {result.valid ? '✓' : '⚠️'}
-                </span>
+                result.valid ? (
+                  <svg className="w-4 h-4 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4 text-red-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" title={result.error}>
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                )
               )}
             </div>
           )
@@ -294,8 +387,8 @@ export default function SpreadsheetEditor() {
     enableCellChangeFlash: true,
     animateRows: true,
     getRowId: (params: any) => params.data.id,
-    rowHeight: 42,
-    headerHeight: 42,
+    rowHeight: 48,
+    headerHeight: 44,
     suppressCellFocus: false,
     enableCellTextSelection: true,
     suppressClipboardPaste: false,
@@ -309,23 +402,63 @@ export default function SpreadsheetEditor() {
   
   if (columns.length === 0 || documents.length === 0) {
     return (
-      <div className="flex items-center justify-center h-full bg-gray-50">
-        <div className="text-center text-gray-500">
-          <p className="text-lg mb-2">No data loaded</p>
-          <p className="text-sm">Columns: {columns.length}, Documents: {documents.length}</p>
+      <div className="flex items-center justify-center h-full bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg border-2 border-dashed border-gray-300">
+        <div className="text-center px-6 py-8">
+          <div className="w-16 h-16 mx-auto mb-4 bg-gray-200 rounded-full flex items-center justify-center">
+            <svg className="w-8 h-8 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+          </div>
+          <p className="text-lg font-semibold text-gray-700 mb-2">No Data Loaded</p>
+          <p className="text-sm text-gray-500">Upload a CSV file to get started</p>
         </div>
       </div>
     )
   }
   
+  // Calculate stats
+  const stats = useMemo(() => {
+    const total = documents.length
+    const processed = documents.filter(d => d.status === 'success').length
+    const failed = documents.filter(d => d.status === 'failed').length
+    const pending = documents.filter(d => d.status === 'pending').length
+    const processing = documents.filter(d => d.status === 'processing').length
+
+    return { total, processed, failed, pending, processing }
+  }, [documents])
+
   return (
     <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }} className="bg-white">
+      {/* Stats Cards */}
+      <div className="grid grid-cols-5 gap-3 px-4 py-3 bg-gray-50 border-b border-gray-200" style={{ flexShrink: 0 }}>
+        <div className="bg-white border border-gray-200 rounded-lg px-3 py-2">
+          <div className="text-xs text-gray-500 font-medium mb-0.5">Total</div>
+          <div className="text-xl font-bold text-gray-900">{stats.total}</div>
+        </div>
+        <div className="bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+          <div className="text-xs text-green-700 font-medium mb-0.5">Processed</div>
+          <div className="text-xl font-bold text-green-700">{stats.processed}</div>
+        </div>
+        <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+          <div className="text-xs text-red-700 font-medium mb-0.5">Failed</div>
+          <div className="text-xl font-bold text-red-700">{stats.failed}</div>
+        </div>
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+          <div className="text-xs text-blue-700 font-medium mb-0.5">Processing</div>
+          <div className="text-xl font-bold text-blue-700">{stats.processing}</div>
+        </div>
+        <div className="bg-gray-50 border border-gray-300 rounded-lg px-3 py-2">
+          <div className="text-xs text-gray-600 font-medium mb-0.5">Pending</div>
+          <div className="text-xl font-bold text-gray-700">{stats.pending}</div>
+        </div>
+      </div>
+
       {/* Toolbar */}
       <div className="flex items-center gap-4 px-4 py-2.5 bg-white border-b border-gray-200" style={{ flexShrink: 0 }}>
         <span className="text-sm text-gray-700 font-medium">
           {documents.length} documents
         </span>
-        
+
         {selectedRowIds.length > 0 && (
           <>
             <span className="text-gray-300">|</span>
@@ -334,14 +467,16 @@ export default function SpreadsheetEditor() {
             </span>
           </>
         )}
-        
+
         <div style={{ flex: 1 }} />
-        
+
         <button
           onClick={() => addColumn('New Column')}
-          className="px-3 py-1.5 text-sm bg-white border border-gray-300 hover:bg-gray-50 rounded transition-colors flex items-center gap-1.5 text-gray-700 shadow-sm"
+          className="px-3 py-1.5 text-sm bg-white border border-gray-300 hover:bg-gray-50 rounded-lg transition-colors flex items-center gap-1.5 text-gray-700 shadow-sm"
         >
-          <span>➕</span>
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+          </svg>
           <span>Add Column</span>
         </button>
       </div>
@@ -362,18 +497,7 @@ export default function SpreadsheetEditor() {
         </div>
       </div>
       
-      {/* Status bar */}
-      <div className="flex items-center gap-6 px-4 py-2 bg-gray-50 border-t border-gray-200 text-xs text-gray-600 flex-shrink-0">
-        <span className="font-medium">
-          ✅ {documents.filter(d => d.status === 'success').length} processed
-        </span>
-        <span className="font-medium">
-          ❌ {documents.filter(d => d.status === 'failed').length} failed
-        </span>
-        <span className="font-medium">
-          ⏳ {documents.filter(d => d.status === 'pending').length} pending
-        </span>
-      </div>
+      {/* Status bar - removed since stats are now at top */}
     </div>
   )
 }

@@ -18,57 +18,66 @@ export default function Home() {
   const [exclusionFile, setExclusionFile] = useState<File | null>(null)
 
   return (
-    <div className="space-y-4">
-      {/* Mode Selector */}
-      <div className="flex justify-center gap-4 mb-6">
-        <button
-          onClick={() => setMode('single')}
-          className={`px-6 py-2 rounded font-medium ${
-            mode === 'single'
-              ? 'bg-blue-600 text-white'
-              : 'bg-gray-200 text-gray-700'
-          }`}
-        >
-          Single PDF
-        </button>
-        <button
-          onClick={() => setMode('batch')}
-          className={`px-6 py-2 rounded font-medium ${
-            mode === 'batch'
-              ? 'bg-blue-600 text-white'
-              : 'bg-gray-200 text-gray-700'
-          }`}
-        >
-          Batch CSV
-        </button>
+    <div className="flex flex-col" style={{ height: 'calc(100vh - 180px)' }}>
+      {/* Toolbar with Mode Selector */}
+      <div className="flex items-center justify-between mb-6 pb-4 border-b border-gray-200">
+        <div className="flex gap-2">
+          <button
+            onClick={() => setMode('single')}
+            className={`px-6 py-2 rounded-lg font-medium transition-all duration-200 ${
+              mode === 'single'
+                ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-md'
+                : 'bg-white text-gray-700 border border-gray-300 hover:border-gray-400 hover:bg-gray-50'
+            }`}
+          >
+            Single Document
+          </button>
+          <button
+            onClick={() => setMode('batch')}
+            className={`px-6 py-2 rounded-lg font-medium transition-all duration-200 ${
+              mode === 'batch'
+                ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-md'
+                : 'bg-white text-gray-700 border border-gray-300 hover:border-gray-400 hover:bg-gray-50'
+            }`}
+          >
+            Batch Processing
+          </button>
+        </div>
+
+        {/* Reserved space for future profile section */}
+        <div className="flex items-center gap-3">
+          {/* Profile section will go here after auth implementation */}
+        </div>
       </div>
 
-      {/* Main Content */}
+      {/* Main Content - Takes remaining vertical space */}
       {mode === 'batch' ? (
-        <div className="flex gap-6" style={{ height: 'calc(100vh - 200px)', minHeight: '600px' }}>
-          {/* Configuration Panel - Fixed width, closer to left */}
-          <div className="w-80 flex-shrink-0" style={{ maxWidth: '320px' }}>
-            <ConfigPanel 
-              config={config} 
+        <div className="flex gap-8 flex-1 min-h-0">
+          {/* Configuration Panel - Wider for better usability */}
+          <div className="w-96 flex-shrink-0">
+            <ConfigPanel
+              config={config}
               setConfig={setConfig}
               onExclusionFileChange={setExclusionFile}
             />
           </div>
           {/* Batch Upload - Takes remaining space */}
-          <div className="flex-1 min-w-0" style={{ minHeight: 0 }}>
+          <div className="flex-1 min-w-0">
             <BatchUpload config={config} exclusionFile={exclusionFile} />
           </div>
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-1">
-            <ConfigPanel 
-              config={config} 
+        <div className="flex gap-8 flex-1 min-h-0">
+          {/* Configuration Panel - Wider sidebar */}
+          <div className="w-96 flex-shrink-0">
+            <ConfigPanel
+              config={config}
               setConfig={setConfig}
               onExclusionFileChange={setExclusionFile}
             />
           </div>
-          <div className="lg:col-span-2">
+          {/* Single Upload - Takes remaining space */}
+          <div className="flex-1 min-w-0">
             <SingleUpload config={config} exclusionFile={exclusionFile} />
           </div>
         </div>

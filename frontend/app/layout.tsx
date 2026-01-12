@@ -19,23 +19,26 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className={`min-h-screen bg-gray-50 ${ibmPlexSans.className}`}>
-        <header className="bg-white border-b border-gray-200">
-          <div className="max-w-7xl mx-auto px-4 py-4">
-            <h1 className="text-xl font-bold text-gray-900">
-              Document Metadata-Tagging
-            </h1>
+      <body className={`min-h-screen bg-stone-50 ${ibmPlexSans.className}`}>
+        <header className="bg-white border-b border-gray-200 shadow-sm">
+          <div className="px-8 py-5">
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">
+                Document Metadata Tagging
+              </h1>
+              <p className="text-sm text-gray-500">AI-powered multi-lingual tag generation</p>
+            </div>
           </div>
         </header>
 
-        <main className="w-full px-8 py-6 mb-12">
+        <main className="w-full px-8 py-8">
           {children}
         </main>
 
-        <footer className="border-t border-gray-200 mt-auto">
-          <div className="max-w-7xl mx-auto px-4 py-3">
-            <p className="text-center text-xs text-gray-400">
-              Document Meta-Tagging System
+        <footer className="border-t border-gray-200 mt-auto bg-white">
+          <div className="px-8 py-4">
+            <p className="text-center text-sm text-gray-500">
+              Multi-lingual Document Processing System
             </p>
           </div>
         </footer>
