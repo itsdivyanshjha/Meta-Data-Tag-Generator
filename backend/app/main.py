@@ -1,11 +1,46 @@
+from contextlib import asynccontextmanager
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.routers import single, batch, status
+from app.routers import auth
+from app.database import get_database
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan manager for startup and shutdown events"""
+    # Startup
+    logger.info("Starting up application...")
+    db = get_database()
+    try:
+        await db.connect()
+        logger.info("Database connection established")
+    except Exception as e:
+        logger.warning(f"Database connection failed: {e}. Auth features will be unavailable.")
+
+    yield
+
+    # Shutdown
+    logger.info("Shutting down application...")
+    try:
+        await db.disconnect()
+        logger.info("Database connection closed")
+    except Exception as e:
+        logger.warning(f"Error closing database: {e}")
+
 
 app = FastAPI(
     title="Document Meta-Tagging API",
-    version="1.0.0",
-    description="AI-powered document tagging system using OpenRouter"
+    version="2.0.0",
+    description="AI-powered document tagging system with authentication",
+    lifespan=lifespan
 )
 
 # CORS setup for frontend
@@ -21,9 +56,10 @@ app.add_middleware(
 app.include_router(single.router, prefix="/api/single", tags=["Single PDF"])
 app.include_router(batch.router, prefix="/api/batch", tags=["Batch Processing"])
 app.include_router(status.router, prefix="/api", tags=["Status"])
+app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 
 
 @app.get("/")
 def root():
-    return {"message": "Document Meta-Tagging API", "version": "1.0.0"}
+    return {"message": "Document Meta-Tagging API", "version": "2.0.0"}
 

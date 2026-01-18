@@ -297,7 +297,7 @@ export default function SpreadsheetEditor() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                 ) : (
-                  <svg className="w-4 h-4 text-red-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" title={result.error}>
+                  <svg className="w-4 h-4 text-red-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                 )
@@ -399,7 +399,18 @@ export default function SpreadsheetEditor() {
       'row-failed': (params: any) => params.data.status === 'failed',
     }
   }), [])
-  
+
+  // Calculate stats - must be before any early returns
+  const stats = useMemo(() => {
+    const total = documents.length
+    const processed = documents.filter(d => d.status === 'success').length
+    const failed = documents.filter(d => d.status === 'failed').length
+    const pending = documents.filter(d => d.status === 'pending').length
+    const processing = documents.filter(d => d.status === 'processing').length
+
+    return { total, processed, failed, pending, processing }
+  }, [documents])
+
   if (columns.length === 0 || documents.length === 0) {
     return (
       <div className="flex items-center justify-center h-full bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg border-2 border-dashed border-gray-300">
@@ -415,17 +426,6 @@ export default function SpreadsheetEditor() {
       </div>
     )
   }
-  
-  // Calculate stats
-  const stats = useMemo(() => {
-    const total = documents.length
-    const processed = documents.filter(d => d.status === 'success').length
-    const failed = documents.filter(d => d.status === 'failed').length
-    const pending = documents.filter(d => d.status === 'pending').length
-    const processing = documents.filter(d => d.status === 'processing').length
-
-    return { total, processed, failed, pending, processing }
-  }, [documents])
 
   return (
     <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }} className="bg-white">

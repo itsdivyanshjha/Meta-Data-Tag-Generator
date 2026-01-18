@@ -1,6 +1,8 @@
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, EmailStr
 from typing import List, Optional, Literal, Dict, Any
 from enum import Enum
+from datetime import datetime
+from uuid import UUID
 
 
 class TaggingConfig(BaseModel):
@@ -144,3 +146,53 @@ class BatchStartResponse(BaseModel):
     job_id: str
     total_documents: int
     message: str
+
+
+# ===== AUTH MODELS (Phase 2) =====
+
+class RegisterRequest(BaseModel):
+    """Request for user registration"""
+    email: EmailStr
+    password: str = Field(..., min_length=8, description="Password must be at least 8 characters")
+    full_name: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    """Request for user login"""
+    email: EmailStr
+    password: str
+
+
+class TokenResponse(BaseModel):
+    """JWT token response"""
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class RefreshTokenRequest(BaseModel):
+    """Request to refresh access token"""
+    refresh_token: str
+
+
+class UserResponse(BaseModel):
+    """User information response"""
+    id: UUID
+    email: str
+    full_name: Optional[str]
+    is_active: bool
+    is_verified: bool
+    created_at: datetime
+
+
+class LoginResponse(BaseModel):
+    """Response for successful login"""
+    user: UserResponse
+    tokens: TokenResponse
+
+
+class MessageResponse(BaseModel):
+    """Generic message response"""
+    message: str
+    success: bool = True

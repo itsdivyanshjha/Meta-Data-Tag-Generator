@@ -35,3 +35,11 @@ easyocr==1.7.0
 # Language Detection & Encoding
 langdetect==1.0.9
 chardet==5.2.0
+
+# Database & Auth (Phase 2)
+asyncpg==0.29.0
+python-jose[cryptography]==3.3.0
+bcrypt==4.0.1
+passlib==1.7.4
+email-validator==2.1.0
+minio==7.2.0
