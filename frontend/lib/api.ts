@@ -174,6 +174,32 @@ export interface JobListResponse {
   offset: number;
 }
 
+export interface DocumentSummary {
+  id: string;
+  title: string;
+  file_path: string;
+  file_source_type: string;
+  status: string;
+  tags: string[];
+  error_message: string | null;
+  processed_at: string | null;
+  created_at: string;
+}
+
+export interface DocumentListResponse {
+  documents: DocumentSummary[];
+  total: number;
+}
+
+export interface UserStats {
+  total_jobs: number;
+  total_documents: number;
+  documents_processed: number;
+  documents_failed: number;
+  jobs_by_status: Record<string, number>;
+  recent_activity: JobSummary[];
+}
+
 export async function getJobs(limit = 50, offset = 0): Promise<JobListResponse> {
   const response = await authFetch(
     `${API_BASE}/api/history/jobs?limit=${limit}&offset=${offset}`
@@ -190,6 +216,30 @@ export async function deleteJob(jobId: string): Promise<{ message: string }> {
   const response = await authFetch(`${API_BASE}/api/history/jobs/${jobId}`, {
     method: 'DELETE'
   });
+  return handleResponse(response);
+}
+
+export async function getUserStats(): Promise<UserStats> {
+  const response = await authFetch(`${API_BASE}/api/history/stats`);
+  return handleResponse<UserStats>(response);
+}
+
+export async function getDocuments(limit = 50): Promise<DocumentListResponse> {
+  const response = await authFetch(
+    `${API_BASE}/api/history/documents?limit=${limit}`
+  );
+  return handleResponse<DocumentListResponse>(response);
+}
+
+export async function searchDocuments(query: string, limit = 50): Promise<DocumentListResponse> {
+  const response = await authFetch(
+    `${API_BASE}/api/history/documents/search?query=${encodeURIComponent(query)}&limit=${limit}`
+  );
+  return handleResponse<DocumentListResponse>(response);
+}
+
+export async function getDocumentDetail(docId: string): Promise<any> {
+  const response = await authFetch(`${API_BASE}/api/history/documents/${docId}`);
   return handleResponse(response);
 }
 

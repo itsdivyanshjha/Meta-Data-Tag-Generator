@@ -211,3 +211,25 @@ class DocumentRepository:
                 LIMIT $1
             """
             return await self.db.fetch(query, limit)
+
+    async def search_documents(
+        self,
+        user_id: UUID,
+        query_text: str,
+        limit: int = 50
+    ) -> List[asyncpg.Record]:
+        """Search documents by title or tags"""
+        search_pattern = f"%{query_text}%"
+        query = """
+            SELECT id, job_id, user_id, title, file_path, file_source_type,
+                   status, tags, error_message, processed_at, created_at
+            FROM documents
+            WHERE user_id = $1
+              AND (
+                  title ILIKE $2
+                  OR tags::text ILIKE $2
+              )
+            ORDER BY processed_at DESC NULLS LAST
+            LIMIT $3
+        """
+        return await self.db.fetch(query, user_id, search_pattern, limit)

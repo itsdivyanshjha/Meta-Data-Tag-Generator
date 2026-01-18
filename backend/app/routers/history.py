@@ -73,6 +73,16 @@ class DocumentListResponse(BaseModel):
     total: int
 
 
+class UserStats(BaseModel):
+    """User statistics for dashboard"""
+    total_jobs: int
+    total_documents: int
+    documents_processed: int
+    documents_failed: int
+    jobs_by_status: dict
+    recent_activity: List[JobSummary]
+
+
 def _parse_tags(tags_value) -> List[str]:
     """Parse tags from database value (could be JSON string or list)"""
     if tags_value is None:
@@ -317,3 +327,94 @@ async def delete_job(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete job: {str(e)}")
+
+
+@router.get("/stats", response_model=UserStats)
+async def get_user_stats(
+    current_user: dict = Depends(get_current_active_user)
+):
+    """
+    Get statistics for the current user's dashboard.
+    """
+    try:
+        user_id = current_user["id"]
+
+        # Get job counts by status
+        jobs = await job_repo.get_jobs_by_user(user_id, limit=1000, offset=0)
+
+        total_jobs = len(jobs)
+        total_documents = sum(j["total_documents"] for j in jobs)
+        documents_processed = sum(j["processed_count"] for j in jobs)
+        documents_failed = sum(j["failed_count"] for j in jobs)
+
+        # Count jobs by status
+        jobs_by_status = {}
+        for job in jobs:
+            status = job["status"]
+            jobs_by_status[status] = jobs_by_status.get(status, 0) + 1
+
+        # Get recent activity (last 5 jobs)
+        recent_jobs = jobs[:5] if jobs else []
+        recent_activity = [
+            JobSummary(
+                id=job["id"],
+                job_type=job["job_type"],
+                status=job["status"],
+                total_documents=job["total_documents"],
+                processed_count=job["processed_count"],
+                failed_count=job["failed_count"],
+                started_at=job["started_at"],
+                completed_at=job["completed_at"],
+                created_at=job["created_at"]
+            )
+            for job in recent_jobs
+        ]
+
+        return UserStats(
+            total_jobs=total_jobs,
+            total_documents=total_documents,
+            documents_processed=documents_processed,
+            documents_failed=documents_failed,
+            jobs_by_status=jobs_by_status,
+            recent_activity=recent_activity
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {str(e)}")
+
+
+@router.get("/documents/search")
+async def search_documents(
+    query: str = Query(..., min_length=1),
+    limit: int = Query(default=50, ge=1, le=100),
+    current_user: dict = Depends(get_current_active_user)
+):
+    """
+    Search documents by title or tags.
+    """
+    try:
+        user_id = current_user["id"]
+        documents = await doc_repo.search_documents(user_id, query, limit)
+
+        doc_summaries = [
+            DocumentSummary(
+                id=doc["id"],
+                title=doc["title"],
+                file_path=doc["file_path"],
+                file_source_type=doc["file_source_type"],
+                status=doc["status"],
+                tags=_parse_tags(doc["tags"]),
+                error_message=doc.get("error_message"),
+                processed_at=doc["processed_at"],
+                created_at=doc["created_at"]
+            )
+            for doc in documents
+        ]
+
+        return DocumentListResponse(
+            documents=doc_summaries,
+            total=len(doc_summaries)
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
