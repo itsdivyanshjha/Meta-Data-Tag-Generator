@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import single, batch, status
-from app.routers import auth
+from app.routers import auth, history
 from app.database import get_database
 
 # Configure logging
@@ -57,6 +57,7 @@ app.include_router(single.router, prefix="/api/single", tags=["Single PDF"])
 app.include_router(batch.router, prefix="/api/batch", tags=["Batch Processing"])
 app.include_router(status.router, prefix="/api", tags=["Status"])
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
+app.include_router(history.router, prefix="/api/history", tags=["History"])
 
 
 @app.get("/")

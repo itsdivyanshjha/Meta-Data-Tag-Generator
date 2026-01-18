@@ -2,6 +2,7 @@
 Async Batch Processor with WebSocket Progress Updates
 
 Processes documents asynchronously and sends real-time updates via WebSocket.
+Now with database persistence for jobs and documents.
 """
 
 import asyncio
@@ -10,16 +11,18 @@ import time
 import logging
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field
+from uuid import UUID
 from fastapi import WebSocket
 
 from app.models import (
-    TaggingConfig, 
-    DocumentStatus, 
+    TaggingConfig,
+    DocumentStatus,
     WebSocketProgressUpdate
 )
 from app.services.pdf_extractor import PDFExtractor
 from app.services.ai_tagger import AITagger
 from app.services.file_handler import FileHandler
+from app.repositories import JobRepository, DocumentRepository
 
 logger = logging.getLogger(__name__)
 
@@ -39,61 +42,145 @@ class BatchJob:
     start_time: Optional[float] = None
     end_time: Optional[float] = None
     cancelled: bool = False  # Flag to indicate if job was cancelled
+    # Database persistence fields
+    db_job_id: Optional[UUID] = None  # UUID from database
+    user_id: Optional[UUID] = None  # User who initiated the job
+    document_ids: List[UUID] = field(default_factory=list)  # Document UUIDs from database
 
 
 class AsyncBatchProcessor:
     """
     Async batch processor that sends real-time updates via WebSocket
-    
+
     Usage:
         processor = AsyncBatchProcessor()
-        job = await processor.start_job(documents, config, column_mapping)
+        job = await processor.start_job(documents, config, column_mapping, user_id)
         await processor.process_batch(job, websocket)
     """
-    
+
     # Store active jobs (in production, use Redis or database)
     active_jobs: Dict[str, BatchJob] = {}
-    
+
     # Rate limiting: delay between documents (seconds)
     RATE_LIMIT_DELAY = 0.5
-    
+
     def __init__(self):
         self.extractor = PDFExtractor()
         self.file_handler = FileHandler()
+        self.job_repo = JobRepository()
+        self.doc_repo = DocumentRepository()
+        self._db_available = True  # Flag to track if DB is available
     
     async def start_job(
         self,
         documents: List[Dict[str, Any]],
         config: TaggingConfig,
-        column_mapping: Dict[str, str]
+        column_mapping: Dict[str, str],
+        user_id: Optional[UUID] = None
     ) -> BatchJob:
         """
         Initialize a new batch job
-        
+
         Args:
             documents: List of document data (from spreadsheet rows)
             config: Tagging configuration
             column_mapping: Maps column IDs to system fields
-            
+            user_id: Optional user ID for authenticated users
+
         Returns:
             BatchJob instance
         """
         job_id = str(uuid.uuid4())
-        
+        db_job_id = None
+        document_ids = []
+
+        # Try to persist to database
+        try:
+            # Create job in database
+            config_dict = {
+                "model_name": config.model_name,
+                "num_pages": config.num_pages,
+                "num_tags": config.num_tags,
+                "exclusion_words": config.exclusion_words
+            }
+            db_job = await self.job_repo.create_job(
+                user_id=user_id,
+                job_type="batch",
+                total_documents=len(documents),
+                config=config_dict
+            )
+            db_job_id = db_job["id"]
+            logger.info(f"Persisted job to database: {db_job_id}")
+
+            # Create document records in database
+            for doc_data in documents:
+                doc_info = self._extract_document_info(doc_data, column_mapping)
+                db_doc = await self.doc_repo.create_document(
+                    job_id=db_job_id,
+                    user_id=user_id,
+                    title=doc_info.get("title", "Untitled"),
+                    file_path=doc_info.get("file_path", ""),
+                    file_source_type=doc_info.get("file_source_type", "url")
+                )
+                document_ids.append(db_doc["id"])
+            logger.info(f"Persisted {len(document_ids)} documents to database")
+
+        except Exception as e:
+            logger.warning(f"Database persistence failed (job will still run): {e}")
+            self._db_available = False
+
         job = BatchJob(
             job_id=job_id,
             documents=documents,
             config=config,
             column_mapping=column_mapping,
             status="pending",
-            start_time=time.time()
+            start_time=time.time(),
+            db_job_id=db_job_id,
+            user_id=user_id,
+            document_ids=document_ids
         )
-        
+
         self.active_jobs[job_id] = job
         logger.info(f"Created batch job {job_id} with {len(documents)} documents")
-        
+
         return job
     
+    async def _update_job_status_db(self, job: BatchJob, status: str, error: Optional[str] = None):
+        """Update job status in database"""
+        if job.db_job_id and self._db_available:
+            try:
+                await self.job_repo.update_job_status(job.db_job_id, status, error)
+            except Exception as e:
+                logger.warning(f"Failed to update job status in DB: {e}")
+
+    async def _update_document_result_db(
+        self,
+        job: BatchJob,
+        doc_idx: int,
+        status: str,
+        tags: Optional[List[str]] = None,
+        extracted_text: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None
+    ):
+        """Update document result in database"""
+        if job.db_job_id and self._db_available and doc_idx < len(job.document_ids):
+            try:
+                doc_id = job.document_ids[doc_idx]
+                await self.doc_repo.update_document_result(
+                    doc_id=doc_id,
+                    status=status,
+                    tags=tags,
+                    extracted_text=extracted_text,
+                    processing_metadata=metadata,
+                    error_message=error
+                )
+                # Update job progress counters
+                await self.job_repo.increment_job_counts(job.db_job_id, success=(status == "success"))
+            except Exception as e:
+                logger.warning(f"Failed to update document result in DB: {e}")
+
     async def process_batch(
         self,
         job: BatchJob,
@@ -101,16 +188,17 @@ class AsyncBatchProcessor:
     ) -> BatchJob:
         """
         Process all documents in the batch and send WebSocket updates
-        
+
         Args:
             job: The batch job to process
             websocket: WebSocket connection for sending updates
-            
+
         Returns:
             Updated BatchJob with results
         """
         try:
             job.status = "processing"
+            await self._update_job_status_db(job, "processing")
             total = len(job.documents)
             
             # Create AI tagger instance
@@ -199,8 +287,19 @@ class AsyncBatchProcessor:
                         job.processed_count += 1
                     else:
                         job.failed_count += 1
-                    
+
                     job.results.append(result)
+
+                    # Persist result to database
+                    await self._update_document_result_db(
+                        job=job,
+                        doc_idx=idx,
+                        status="success" if result["success"] else "failed",
+                        tags=result.get("tags", []),
+                        extracted_text=result.get("metadata", {}).get("text_preview"),
+                        metadata=result.get("metadata"),
+                        error=result.get("error")
+                    )
                     
                     # Send completion update with tags
                     await self._send_update(
@@ -278,23 +377,28 @@ class AsyncBatchProcessor:
                 job.status = "completed"
                 job.end_time = time.time()
                 job.progress = 1.0
-                
+                await self._update_job_status_db(job, "completed")
+
                 logger.info(
                     f"Batch job {job.job_id} completed: "
                     f"{job.processed_count} succeeded, {job.failed_count} failed"
                 )
-            
+            else:
+                await self._update_job_status_db(job, "cancelled")
+
             return job
-            
+
         except asyncio.CancelledError:
             logger.info(f"Job {job.job_id} cancelled (outer CancelledError).")
             job.cancelled = True
             job.status = "cancelled"
             job.end_time = time.time()
+            await self._update_job_status_db(job, "cancelled")
             return job
         except Exception as e:
             job.status = "failed"
             job.end_time = time.time()
+            await self._update_job_status_db(job, "failed", str(e))
             logger.error(f"Batch job {job.job_id} failed: {str(e)}")
             raise
     

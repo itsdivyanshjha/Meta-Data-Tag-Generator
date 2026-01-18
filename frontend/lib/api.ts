@@ -1,4 +1,5 @@
 import { TaggingConfig, SinglePDFResponse, BatchProcessResponse, HealthCheckResponse } from './types';
+import { useAuthStore, getAuthHeaders } from './authStore';
 
 // Default to localhost for development, can be overridden via env var for production
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
@@ -12,6 +13,46 @@ export class APIError extends Error {
     super(message);
     this.name = 'APIError';
   }
+}
+
+/**
+ * Create fetch options with auth headers
+ */
+function createFetchOptions(options: RequestInit = {}): RequestInit {
+  const authHeaders = getAuthHeaders();
+
+  return {
+    ...options,
+    headers: {
+      ...authHeaders,
+      ...options.headers
+    }
+  };
+}
+
+/**
+ * Authenticated fetch wrapper that handles token refresh
+ */
+async function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  const fetchOptions = createFetchOptions(options);
+  let response = await fetch(url, fetchOptions);
+
+  // If unauthorized, try to refresh token and retry
+  if (response.status === 401) {
+    const authStore = useAuthStore.getState();
+    const refreshed = await authStore.refreshTokens();
+
+    if (refreshed) {
+      // Retry with new token
+      const newFetchOptions = createFetchOptions(options);
+      response = await fetch(url, newFetchOptions);
+    } else {
+      // Refresh failed, logout user
+      authStore.logout();
+    }
+  }
+
+  return response;
 }
 
 async function handleResponse<T>(response: Response): Promise<T> {
@@ -40,22 +81,23 @@ export async function processSinglePDF(
   pdfUrl?: string
 ): Promise<SinglePDFResponse> {
   const formData = new FormData();
-  
+
   if (file) {
-  formData.append('pdf_file', file);
+    formData.append('pdf_file', file);
   }
-  
+
   if (pdfUrl) {
     formData.append('pdf_url', pdfUrl);
   }
-  
+
   formData.append('config', JSON.stringify(config));
-  
+
   if (exclusionFile) {
     formData.append('exclusion_file', exclusionFile);
   }
 
-  const response = await fetch(`${API_BASE}/api/single/process`, {
+  // Use authFetch to include auth headers
+  const response = await authFetch(`${API_BASE}/api/single/process`, {
     method: 'POST',
     body: formData,
   });
@@ -71,12 +113,12 @@ export async function processBatchCSV(
   const formData = new FormData();
   formData.append('csv_file', file);
   formData.append('config', JSON.stringify(config));
-  
+
   if (exclusionFile) {
     formData.append('exclusion_file', exclusionFile);
   }
 
-  const response = await fetch(`${API_BASE}/api/batch/process`, {
+  const response = await authFetch(`${API_BASE}/api/batch/process`, {
     method: 'POST',
     body: formData,
   });
@@ -109,5 +151,45 @@ export function downloadCSV(dataUrl: string, filename: string = 'tagged_document
  */
 export function getPdfPreviewUrl(pdfUrl: string): string {
   return `${API_BASE}/api/single/preview?url=${encodeURIComponent(pdfUrl)}`;
+}
+
+// ===== HISTORY API =====
+
+export interface JobSummary {
+  id: string;
+  job_type: string;
+  status: string;
+  total_documents: number;
+  processed_count: number;
+  failed_count: number;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+}
+
+export interface JobListResponse {
+  jobs: JobSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export async function getJobs(limit = 50, offset = 0): Promise<JobListResponse> {
+  const response = await authFetch(
+    `${API_BASE}/api/history/jobs?limit=${limit}&offset=${offset}`
+  );
+  return handleResponse<JobListResponse>(response);
+}
+
+export async function getJobDetail(jobId: string): Promise<any> {
+  const response = await authFetch(`${API_BASE}/api/history/jobs/${jobId}`);
+  return handleResponse(response);
+}
+
+export async function deleteJob(jobId: string): Promise<{ message: string }> {
+  const response = await authFetch(`${API_BASE}/api/history/jobs/${jobId}`, {
+    method: 'DELETE'
+  });
+  return handleResponse(response);
 }
 
