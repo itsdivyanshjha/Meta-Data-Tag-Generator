@@ -1,7 +1,7 @@
 # Core Web Framework
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
-python-multipart==0.0.6
+python-multipart==0.0.22
 pydantic==2.5.0
 pydantic-settings==2.1.0
 python-dotenv==1.0.0
@@ -28,7 +28,7 @@ numpy==1.24.3
 
 # Computer Vision & OCR (order matters!)
 opencv-python==4.8.1.78
-torch==2.0.1
+torch==2.10.0
 torchvision==0.15.2
 easyocr==1.7.0
 
