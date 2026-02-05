@@ -6,7 +6,9 @@ import dynamic from 'next/dynamic'
 import FileUploader from '@/components/batch/FileUploader'
 import ProcessingControls from '@/components/batch/ProcessingControls'
 import ExportPanel from '@/components/batch/ExportPanel'
+import { ErrorNotificationContainer } from '@/components/ErrorNotification'
 import { useBatchStore } from '@/lib/batchStore'
+import { useNotificationStore } from '@/lib/notificationStore'
 
 // Dynamically import SpreadsheetEditor to avoid SSR issues with AG Grid
 const SpreadsheetEditor = dynamic(
@@ -24,6 +26,7 @@ const SpreadsheetEditor = dynamic(
 export default function BatchProcessingPage() {
   const [activePanel, setActivePanel] = useState<'upload' | 'settings' | 'export'>('upload')
   const { documents, columns, isProcessing, progress } = useBatchStore()
+  const { notifications, removeNotification } = useNotificationStore()
   
   const hasData = documents.length > 0
   const hasProcessedDocs = documents.some(d => d.status === 'success' || d.status === 'failed')
@@ -189,6 +192,12 @@ export default function BatchProcessingPage() {
           </div>
         </div>
       )}
+      
+      {/* Error Notifications Container */}
+      <ErrorNotificationContainer
+        notifications={notifications}
+        onRemove={removeNotification}
+      />
     </div>
   )
 }

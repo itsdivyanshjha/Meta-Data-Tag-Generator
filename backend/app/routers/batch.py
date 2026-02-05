@@ -8,7 +8,7 @@ Provides endpoints for:
 - Legacy CSV upload processing
 """
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import JSONResponse
 from app.models import (
     BatchProcessResponse, 
@@ -24,7 +24,9 @@ from app.services.csv_processor import CSVProcessor
 from app.services.async_batch_processor import batch_processor, AsyncBatchProcessor
 from app.services.exclusion_parser import ExclusionListParser
 from app.services.file_handler import FileHandler
+from app.services.auth_service import AuthService
 from typing import Optional, List, Dict, Any
+from uuid import UUID
 import time
 import json
 import base64
@@ -39,16 +41,49 @@ router = APIRouter()
 
 # ===== WEBSOCKET BATCH PROCESSING =====
 
+async def get_user_from_websocket(websocket: WebSocket) -> Optional[UUID]:
+    """Extract and verify user from WebSocket query parameters or headers"""
+    try:
+        # Try to get token from query parameters
+        query_params = dict(websocket.query_params)
+        token = query_params.get("token")
+        
+        if not token:
+            # Try to get from headers (some WebSocket clients send auth in headers)
+            headers = dict(websocket.headers)
+            auth_header = headers.get("authorization") or headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+        
+        if not token:
+            return None
+        
+        # Verify token
+        auth_service = AuthService()
+        payload = auth_service.verify_access_token(token)
+        
+        if payload is None:
+            return None
+        
+        return UUID(payload["sub"])
+    except Exception as e:
+        logger.debug(f"Failed to extract user from WebSocket: {e}")
+        return None
+
 @router.websocket("/ws/{job_id}")
 async def batch_progress_websocket(websocket: WebSocket, job_id: str):
     """
     WebSocket endpoint for real-time batch processing progress
     
     Flow:
-    1. Client connects with a job_id
+    1. Client connects with a job_id and optional token query parameter (?token=...)
     2. Client sends BatchStartRequest JSON
     3. Server processes documents and sends progress updates
     4. Server sends final completion message
+    
+    Authentication:
+    - Pass token as query parameter: ws://host/api/batch/ws/{job_id}?token=...
+    - Or via Authorization header: Authorization: Bearer <token>
     
     Message format (client → server):
     {
@@ -72,6 +107,13 @@ async def batch_progress_websocket(websocket: WebSocket, job_id: str):
     """
     await websocket.accept()
     logger.info(f"WebSocket connected for job {job_id}")
+    
+    # Extract user_id from authentication token
+    user_id = await get_user_from_websocket(websocket)
+    if user_id:
+        logger.info(f"Authenticated user {user_id} for job {job_id}")
+    else:
+        logger.info(f"Anonymous user for job {job_id}")
     
     try:
         # Wait for the batch start request
@@ -109,30 +151,37 @@ async def batch_progress_websocket(websocket: WebSocket, job_id: str):
             "message": f"Starting processing of {len(documents)} documents"
         })
         
-        # Create and process the batch job
+        # Create and process the batch job (with user_id for persistence)
         processor = AsyncBatchProcessor()
-        job = await processor.start_job(documents, config, column_mapping)
+        job = await processor.start_job(documents, config, column_mapping, user_id=user_id)
         
-        # Override job_id to match the one from URL
+        # Store the original job_id for logging/tracking
+        original_generated_job_id = job.job_id
+        # Override job_id to match the one from URL for consistency
         job.job_id = job_id
         
+        logger.info(f"Starting batch processing: generated_id={original_generated_job_id}, url_id={job_id}, db_id={job.db_job_id}")
+        
         # Process the batch (this sends progress updates via websocket)
-        await processor.process_batch(job, websocket)
+        completed_job = await processor.process_batch(job, websocket)
+        
+        # Verify database update was successful
+        logger.info(f"Batch processing complete. Job status: {completed_job.status}, DB ID: {completed_job.db_job_id}")
         
         # Check if job was cancelled
-        if job.cancelled:
-            logger.info(f"Job {job_id} was cancelled. Skipping final message.")
+        if completed_job.cancelled:
+            logger.info(f"Job {job_id} was cancelled.")
             # Try to send cancellation message if WebSocket still open
             try:
                 await websocket.send_json({
                     "type": "cancelled",
                     "job_id": job_id,
-                    "processed_count": job.processed_count,
-                    "failed_count": job.failed_count,
-                    "message": f"Processing cancelled: {job.processed_count} documents processed before cancellation"
+                    "processed_count": completed_job.processed_count,
+                    "failed_count": completed_job.failed_count,
+                    "message": f"Processing cancelled: {completed_job.processed_count} documents processed before cancellation"
                 })
-            except:
-                pass
+            except Exception as send_error:
+                logger.debug(f"Could not send cancellation message: {send_error}")
         else:
             # Send final completion message
             try:
@@ -140,22 +189,29 @@ async def batch_progress_websocket(websocket: WebSocket, job_id: str):
                     "type": "completed",
                     "job_id": job_id,
                     "total_documents": len(documents),
-                    "processed_count": job.processed_count,
-                    "failed_count": job.failed_count,
-                    "processing_time": round(job.end_time - job.start_time, 2) if job.end_time else 0,
-                    "message": f"Completed: {job.processed_count} succeeded, {job.failed_count} failed"
+                    "processed_count": completed_job.processed_count,
+                    "failed_count": completed_job.failed_count,
+                    "processing_time": round(completed_job.end_time - completed_job.start_time, 2) if completed_job.end_time else 0,
+                    "message": f"Completed: {completed_job.processed_count} succeeded, {completed_job.failed_count} failed"
                 })
-            except:
-                logger.debug(f"Could not send completion message for job {job_id} (WebSocket likely closed)")
+            except Exception as send_error:
+                logger.debug(f"Could not send completion message for job {job_id}: {send_error}")
         
         # Cleanup
         processor.cleanup_job(job_id)
         
     except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected for job {job_id}. Cancelling processing.")
+        logger.warning(f"WebSocket disconnected for job {job_id}. Cancelling processing.")
         # Cancel the job immediately when WebSocket disconnects
         if job_id in processor.active_jobs:
-            processor.active_jobs[job_id].cancelled = True
+            job = processor.active_jobs[job_id]
+            job.cancelled = True
+            # Try to update DB that job was cancelled
+            try:
+                if job.db_job_id:
+                    await processor._update_job_status_db(job, "cancelled")
+            except Exception as db_error:
+                logger.error(f"Failed to mark job {job_id} as cancelled in DB: {db_error}")
             logger.info(f"Job {job_id} cancelled due to WebSocket disconnect")
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON in WebSocket message: {str(e)}")
@@ -168,6 +224,15 @@ async def batch_progress_websocket(websocket: WebSocket, job_id: str):
             pass
     except Exception as e:
         logger.error(f"WebSocket error for job {job_id}: {str(e)}", exc_info=True)
+        # Try to update DB that job failed
+        try:
+            if job_id in processor.active_jobs:
+                job = processor.active_jobs[job_id]
+                if job.db_job_id:
+                    await processor._update_job_status_db(job, "failed", str(e))
+        except Exception as db_error:
+            logger.error(f"Failed to mark job {job_id} as failed in DB: {db_error}")
+        
         try:
             await websocket.send_json({
                 "error": str(e),

@@ -3,6 +3,9 @@ from typing import List, Dict, Any, Optional, Set
 import re
 import logging
 import unicodedata
+import time
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +38,27 @@ class AITagger:
                 )
                 break
         
+        # Initialize OpenAI client with timeout and retry configuration
+        # Use httpx.Timeout with all four parameters (timeout applies to read)
+        import httpx
+        
         self.client = openai.OpenAI(
             base_url="https://openrouter.ai/api/v1",
-            api_key=api_key
+            api_key=api_key,
+            timeout=httpx.Timeout(
+                timeout=settings.api_read_timeout,
+                connect=settings.api_connect_timeout,
+            ),
+            max_retries=settings.api_max_retries,
         )
+        
+        # Track rate limit state for adaptive backoff
+        self._rate_limit_delay = settings.api_retry_delay
+        self._last_rate_limit_time = 0
+        self._rate_limit_hit_count = 0  # Track consecutive rate limit hits
+        
+        # Track if model doesn't support system messages
+        self._no_system_message = False
     
     def generate_tags(
         self,
@@ -95,13 +115,15 @@ class AITagger:
                 quality_info
             )
             
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=[
-                        {
-                            "role": "system", 
-                            "content": """You are a multilingual document tagging expert for Indian government documents.
+            # Check if we need to wait due to rate limiting
+            current_time = time.time()
+            if current_time - self._last_rate_limit_time < self._rate_limit_delay:
+                wait_time = self._rate_limit_delay - (current_time - self._last_rate_limit_time)
+                logger.info(f"⏳ Rate limit backoff: waiting {wait_time:.2f}s before request")
+                time.sleep(wait_time)
+            
+            # System message content
+            system_content = """You are a multilingual document tagging expert for Indian government documents.
 
 LANGUAGE SUPPORT: You understand ALL Indian languages including:
 - Devanagari script: Hindi, Marathi, Sanskrit
@@ -132,12 +154,54 @@ TAG FORMAT RULES:
 ✗ NO long phrases: "dr ambedkar foundation annual report 2015" is TOO LONG
 
 OUTPUT FORMAT: comma-separated tags only, nothing else"""
-                        },
+            
+            try:
+                # Build messages - skip system message if model doesn't support it
+                if self._no_system_message:
+                    # Merge system instructions into user prompt
+                    user_prompt = f"""{system_content}
+
+{prompt}"""
+                    messages = [{"role": "user", "content": user_prompt}]
+                else:
+                    messages = [
+                        {"role": "system", "content": system_content},
                         {"role": "user", "content": prompt}
-                    ],
+                    ]
+                
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
                     max_tokens=400,
                     temperature=0.2
                 )
+            except openai.BadRequestError as e:
+                # Check if it's the "developer instruction" error (system messages not supported)
+                error_str = str(e).lower()
+                if ("developer instruction" in error_str or "system" in error_str) and not self._no_system_message:
+                    logger.warning(f"⚠️ Model {self.model_name} doesn't support system messages. Retrying without system message...")
+                    self._no_system_message = True
+                    # Retry without system message - merge instructions into user message
+                    user_prompt = f"""{system_content}
+
+{prompt}"""
+                    try:
+                        response = self.client.chat.completions.create(
+                            model=self.model_name,
+                            messages=[{"role": "user", "content": user_prompt}],
+                            max_tokens=400,
+                            temperature=0.2
+                        )
+                    except Exception as retry_error:
+                        logger.error(f"Error retrying without system message: {str(retry_error)}")
+                        return {
+                            "success": False,
+                            "error": f"Model compatibility error: {str(e)}",
+                            "tags": []
+                        }
+                else:
+                    # Different BadRequestError, re-raise
+                    raise
             except UnicodeEncodeError as e:
                 logger.error(f"❌ Unicode encoding error in API call: {e}")
                 logger.warning(f"⚠️ Error at position {e.start if hasattr(e, 'start') else 'unknown'}")
@@ -265,17 +329,34 @@ OUTPUT FORMAT: comma-separated tags only, nothing else"""
                 "tags": []
             }
         except openai.RateLimitError as e:
+            # Track consecutive rate limit hits
+            self._rate_limit_hit_count += 1
+            
+            # Exponential backoff for rate limits (capped at 2 minutes for free tier)
+            new_delay = min(
+                self._rate_limit_delay * settings.batch_retry_delay_multiplier,
+                settings.batch_max_delay_between_requests
+            )
+            self._rate_limit_delay = new_delay
+            self._last_rate_limit_time = time.time()
+            
             error_msg = str(e)
+            logger.error(f"🚫 RATE LIMITED (Hit #{self._rate_limit_hit_count}): Provider rejected request. Delay: {self._rate_limit_delay:.0f}s")
+            logger.error(f"   Hint: You're using free tier. Add credits to OpenRouter for higher limits.")
+            logger.error(f"   URL: https://openrouter.ai/account/billing/overview")
+            
             if "429" in error_msg:
                 return {
                     "success": False,
-                    "error": "Rate limit exceeded. Free models have request limits. Try: 1) Wait a minute and retry, 2) Use a different model, or 3) Add credits to your OpenRouter account.",
-                    "tags": []
+                    "error": f"RATE_LIMITED: OpenRouter free tier limit hit (attempt #{self._rate_limit_hit_count}). Adding {self._rate_limit_delay:.0f}s delay before next attempt.",
+                    "tags": [],
+                    "rate_limited": True
                 }
             return {
                 "success": False,
-                "error": f"Rate limit exceeded: {error_msg}",
-                "tags": []
+                "error": f"RATE_LIMITED: {error_msg}",
+                "tags": [],
+                "rate_limited": True
             }
         except Exception as e:
             logger.error(f"Error in generate_tags: {str(e)}", exc_info=True)

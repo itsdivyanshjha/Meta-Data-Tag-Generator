@@ -128,6 +128,10 @@ class WebSocketProgressUpdate(BaseModel):
     progress: float  # 0.0 to 1.0
     tags: Optional[List[str]] = None
     error: Optional[str] = None
+    error_type: Optional[str] = None  # 'rate-limit', 'model-error', 'network', etc.
+    retry_after_ms: Optional[int] = None  # For rate limit errors
+    retry_count: Optional[int] = None  # Attempt number
+    model_name: Optional[str] = None  # Model being used
     metadata: Optional[Dict[str, Any]] = None
 
 

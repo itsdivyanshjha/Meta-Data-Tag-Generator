@@ -51,14 +51,14 @@ class JobRepository:
         offset: int = 0,
         status: Optional[str] = None
     ) -> List[asyncpg.Record]:
-        """Get jobs for a specific user"""
+        """Get jobs for a specific user, including anonymous jobs (for backward compatibility)"""
         if status:
             query = """
                 SELECT id, user_id, job_type, status, total_documents, processed_count,
                        failed_count, config, error_message, started_at, completed_at,
                        created_at, updated_at
                 FROM jobs
-                WHERE user_id = $1 AND status = $2
+                WHERE (user_id = $1 OR user_id IS NULL) AND status = $2
                 ORDER BY created_at DESC
                 LIMIT $3 OFFSET $4
             """
@@ -69,7 +69,7 @@ class JobRepository:
                        failed_count, config, error_message, started_at, completed_at,
                        created_at, updated_at
                 FROM jobs
-                WHERE user_id = $1
+                WHERE user_id = $1 OR user_id IS NULL
                 ORDER BY created_at DESC
                 LIMIT $2 OFFSET $3
             """

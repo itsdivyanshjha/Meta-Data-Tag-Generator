@@ -7,6 +7,8 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 import Papa from 'papaparse'
+import { useAuthStore } from './authStore'
+import { useNotificationStore } from './notificationStore'
 
 // ===== TYPES =====
 
@@ -131,6 +133,19 @@ interface BatchState {
 // System column names that map to backend fields
 const SYSTEM_COLUMN_NAMES = ['title', 'file_path', 'file_source_type', 'description']
 const REQUIRED_COLUMNS = ['title', 'file_path', 'file_source_type']
+
+// Helper function to detect error type from error message
+function detectErrorType(errorMessage: string): 'rate-limit' | 'model-error' | 'network' | 'unknown' {
+  const msg = errorMessage.toLowerCase()
+  if (msg.includes('429') || msg.includes('too many requests') || msg.includes('rate')) {
+    return 'rate-limit'
+  } else if (msg.includes('400') || msg.includes('bad request') || msg.includes('developer instruction')) {
+    return 'model-error'
+  } else if (msg.includes('connection') || msg.includes('network') || msg.includes('timeout')) {
+    return 'network'
+  }
+  return 'unknown'
+}
 
 // Initial processing settings
 const initialProcessingSettings: ProcessingSettings = {
@@ -477,7 +492,12 @@ export const useBatchStore = create<BatchState>((set, get) => ({
     const wsHost = process.env.NEXT_PUBLIC_API_URL 
       ? new URL(process.env.NEXT_PUBLIC_API_URL).host 
       : 'localhost:8000'
-    const wsUrl = `${wsProtocol}//${wsHost}/api/batch/ws/${jobId}`
+    
+    // Get authentication token if available
+    const authStore = useAuthStore.getState()
+    const token = authStore.getAccessToken()
+    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
+    const wsUrl = `${wsProtocol}//${wsHost}/api/batch/ws/${jobId}${tokenParam}`
     
     try {
       const ws = new WebSocket(wsUrl)
@@ -560,6 +580,36 @@ export const useBatchStore = create<BatchState>((set, get) => ({
     
     if (update.error && !update.row_id && update.row_id !== 0) {
       console.error('Batch error:', update.error)
+      
+      // Use error_type if available, otherwise detect from error message
+      const errorType = update.error_type || detectErrorType(update.error)
+      
+      // Emit appropriate notification based on error type
+      switch (errorType) {
+        case 'rate-limit':
+          useNotificationStore.getState().addRateLimitError(
+            update.retry_after_ms || 2000,
+            update.retry_count || 1
+          )
+          break
+        case 'model-error':
+          useNotificationStore.getState().addModelError(
+            update.model_name || 'Unknown',
+            update.error
+          )
+          break
+        case 'network':
+          useNotificationStore.getState().addNetworkError(update.error)
+          break
+        default:
+          useNotificationStore.getState().addNotification({
+            type: 'unknown',
+            title: '❌ Processing Error',
+            message: update.error,
+            autoClose: 0 // Manual close for critical errors
+          })
+      }
+      
       set({ isProcessing: false })
       return
     }

@@ -62,7 +62,8 @@ class AsyncBatchProcessor:
     active_jobs: Dict[str, BatchJob] = {}
 
     # Rate limiting: delay between documents (seconds)
-    RATE_LIMIT_DELAY = 0.5
+    # Increased to reduce rate limit hits from OpenRouter API
+    RATE_LIMIT_DELAY = 2.0
 
     def __init__(self):
         self.extractor = PDFExtractor()
@@ -110,7 +111,7 @@ class AsyncBatchProcessor:
                 config=config_dict
             )
             db_job_id = db_job["id"]
-            logger.info(f"Persisted job to database: {db_job_id}")
+            logger.info(f"Persisted job to database: {db_job_id} (user_id: {user_id})")
 
             # Create document records in database
             for doc_data in documents:
@@ -147,12 +148,37 @@ class AsyncBatchProcessor:
         return job
     
     async def _update_job_status_db(self, job: BatchJob, status: str, error: Optional[str] = None):
-        """Update job status in database"""
-        if job.db_job_id and self._db_available:
+        """Update job status in database with retry logic"""
+        if not job.db_job_id:
+            logger.warning(f"Job {job.job_id} has no db_job_id, skipping status update to DB")
+            return False
+        if not self._db_available:
+            logger.warning(f"Database not available for job {job.job_id}, skipping status update")
+            return False
+        
+        # Retry logic for database updates
+        max_retries = 3
+        retry_delay = 0.5  # seconds
+        
+        for attempt in range(max_retries):
             try:
-                await self.job_repo.update_job_status(job.db_job_id, status, error)
+                result = await self.job_repo.update_job_status(job.db_job_id, status, error)
+                if result:
+                    logger.info(f"✅ Updated job {job.db_job_id} status to '{status}' in database (attempt {attempt + 1})")
+                    return True
+                else:
+                    logger.warning(f"Job {job.db_job_id} not found in database for status update")
+                    return False
             except Exception as e:
-                logger.warning(f"Failed to update job status in DB: {e}")
+                if attempt < max_retries - 1:
+                    logger.warning(f"Failed to update job status (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    logger.error(f"❌ Failed to update job status after {max_retries} attempts: {e}")
+                    return False
+        
+        return False
 
     async def _update_document_result_db(
         self,
@@ -164,8 +190,14 @@ class AsyncBatchProcessor:
         metadata: Optional[Dict[str, Any]] = None,
         error: Optional[str] = None
     ):
-        """Update document result in database"""
-        if job.db_job_id and self._db_available and doc_idx < len(job.document_ids):
+        """Update document result in database with retry logic"""
+        if not job.db_job_id or not self._db_available or doc_idx >= len(job.document_ids):
+            return False
+        
+        max_retries = 2
+        retry_delay = 0.3
+        
+        for attempt in range(max_retries):
             try:
                 doc_id = job.document_ids[doc_idx]
                 await self.doc_repo.update_document_result(
@@ -178,8 +210,17 @@ class AsyncBatchProcessor:
                 )
                 # Update job progress counters
                 await self.job_repo.increment_job_counts(job.db_job_id, success=(status == "success"))
+                logger.debug(f"Updated document {doc_id} with status '{status}'")
+                return True
             except Exception as e:
-                logger.warning(f"Failed to update document result in DB: {e}")
+                if attempt < max_retries - 1:
+                    logger.debug(f"Failed to update document result (attempt {attempt + 1}/{max_retries}): {e}. Retrying...")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.warning(f"Failed to update document result after {max_retries} attempts: {e}")
+                    return False
+        
+        return False
 
     async def process_batch(
         self,
@@ -312,6 +353,7 @@ class AsyncBatchProcessor:
                         progress=(idx + 1) / total,
                         tags=result.get("tags", []),
                         error=result.get("error"),
+                        model_name=job.config.model_name,
                         metadata=result.get("metadata")
                     )
                     
@@ -350,10 +392,27 @@ class AsyncBatchProcessor:
                         job.end_time = time.time()
                         return job
                     
-                    logger.error(f"Error processing document {idx}: {str(e)}")
+                    # Determine error type for frontend notification
+                    error_type = "unknown"
+                    retry_after_ms = None
+                    retry_count = None
+                    
+                    error_str = str(e)
+                    if "429" in error_str or "rate" in error_msg:
+                        error_type = "rate-limit"
+                        retry_after_ms = 2000  # Default retry after 2 seconds
+                        retry_count = 1  # Could track this in the future
+                    elif "400" in error_str or "bad request" in error_msg:
+                        error_type = "model-error"
+                    elif "connection" in error_msg or "network" in error_msg or "timeout" in error_msg:
+                        error_type = "network"
+                    
+                    logger.error(f"❌ Document {idx + 1}/{total} failed: {str(e)}")
+                    if error_type == "rate-limit":
+                        logger.warning(f"   ⏱️ Rate limited. Waiting before next attempt...")
                     job.failed_count += 1
                     
-                    # Try to send error update (may fail if WebSocket closed)
+                    # Try to send error update with error type (may fail if WebSocket closed)
                     try:
                         await self._send_update(
                             websocket,
@@ -363,7 +422,11 @@ class AsyncBatchProcessor:
                             title=doc_data.get("title", f"Document {idx + 1}"),
                             status=DocumentStatus.FAILED,
                             progress=(idx + 1) / total,
-                            error=str(e)
+                            error=str(e),
+                            error_type=error_type,
+                            retry_after_ms=retry_after_ms,
+                            retry_count=retry_count,
+                            model_name=job.config.model_name
                         )
                     except:
                         # WebSocket probably closed, cancel job
@@ -377,14 +440,20 @@ class AsyncBatchProcessor:
                 job.status = "completed"
                 job.end_time = time.time()
                 job.progress = 1.0
-                await self._update_job_status_db(job, "completed")
-
-                logger.info(
-                    f"Batch job {job.job_id} completed: "
-                    f"{job.processed_count} succeeded, {job.failed_count} failed"
-                )
+                
+                # Ensure database update succeeds before marking job complete
+                db_updated = await self._update_job_status_db(job, "completed")
+                if db_updated:
+                    logger.info(
+                        f"✅ Batch job {job.job_id} COMPLETED AND SAVED: "
+                        f"{job.processed_count} succeeded, {job.failed_count} failed, {total - job.processed_count - job.failed_count} skipped"
+                    )
+                else:
+                    logger.error(f"⚠️ Batch job {job.job_id} completed but FAILED TO SAVE to database!")
+                    # Still mark as completed in memory even if DB failed
             else:
                 await self._update_job_status_db(job, "cancelled")
+                logger.info(f"Job {job.job_id} was marked as cancelled in database")
 
             return job
 
@@ -536,6 +605,10 @@ class AsyncBatchProcessor:
         progress: float,
         tags: Optional[List[str]] = None,
         error: Optional[str] = None,
+        error_type: Optional[str] = None,
+        retry_after_ms: Optional[int] = None,
+        retry_count: Optional[int] = None,
+        model_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ):
         """Send progress update via WebSocket. Raises exception if connection closed."""
@@ -562,6 +635,10 @@ class AsyncBatchProcessor:
             progress=progress,
             tags=tags,
             error=error,
+            error_type=error_type,
+            retry_after_ms=retry_after_ms,
+            retry_count=retry_count,
+            model_name=model_name,
             metadata=metadata
         )
         
