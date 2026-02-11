@@ -11,8 +11,12 @@ export default function FileUploader() {
   const { importCSV, documents } = useBatchStore()
   
   const handleFile = useCallback(async (file: File) => {
-    if (!file.name.toLowerCase().endsWith('.csv')) {
-      setError('Please upload a CSV file')
+    const fileName = file.name.toLowerCase()
+    const isCsv = fileName.endsWith('.csv')
+    const isXlsx = fileName.endsWith('.xlsx') || fileName.endsWith('.xls')
+    
+    if (!isCsv && !isXlsx) {
+      setError('Please upload a CSV or Excel file (.csv, .xlsx, .xls)')
       return
     }
     
@@ -22,7 +26,7 @@ export default function FileUploader() {
     try {
       await importCSV(file)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to parse CSV')
+      setError(err instanceof Error ? err.message : 'Failed to parse file')
     } finally {
       setIsLoading(false)
     }
@@ -87,7 +91,7 @@ export default function FileUploader() {
       >
         <input
           type="file"
-          accept=".csv"
+          accept=".csv,.xlsx,.xls"
           onChange={handleFileChange}
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
           disabled={isLoading}
@@ -97,10 +101,10 @@ export default function FileUploader() {
           <div className="text-5xl">📊</div>
           <div>
             <p className="font-medium text-gray-700">
-              {isLoading ? 'Loading CSV...' : 'Drop your CSV here or click to browse'}
+              {isLoading ? 'Loading file...' : 'Drop your CSV or Excel file here or click to browse'}
             </p>
             <p className="text-sm text-gray-500 mt-1">
-              CSV file with document metadata (title, file_path, file_source_type)
+              CSV (.csv) or Excel (.xlsx, .xls) file with document metadata
             </p>
           </div>
         </div>
@@ -113,32 +117,56 @@ export default function FileUploader() {
         </div>
       )}
       
-      {/* CSV format info */}
-      <div className="p-4 bg-gray-50 border border-gray-200 rounded">
-        <h3 className="font-semibold text-gray-800 mb-2">CSV Format Required</h3>
-        <p className="text-sm text-gray-600 mb-3">
-          Your CSV should have these columns:
-        </p>
-        <div className="bg-white rounded p-3 overflow-x-auto border border-gray-200">
-          <code className="text-xs text-gray-700 whitespace-pre">
-{`title,description,file_source_type,file_path
-"Training Manual","Training document",url,https://example.com/doc1.pdf
-"Annual Report","Financial report",url,https://example.com/doc2.pdf`}
-          </code>
+      {/* File Format Requirements - Simplified */}
+      <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+        <h3 className="font-semibold text-gray-800 mb-3">What we need from your file</h3>
+        
+        {/* Simple Requirements Table */}
+        <div className="space-y-2 mb-4">
+          <div className="grid grid-cols-3 gap-3 text-sm">
+            {/* Header */}
+            <div className="font-medium text-gray-700">Field Name</div>
+            <div className="font-medium text-gray-700">Required</div>
+            <div className="font-medium text-gray-700">What to put here</div>
+            
+            {/* File Path Row */}
+            <div className="text-gray-800">File Path / Link</div>
+            <div className="flex items-center gap-1">
+              <span className="inline-block w-2 h-2 bg-red-500 rounded-full"></span>
+              <span className="text-red-600 font-medium">Yes</span>
+            </div>
+            <div className="text-gray-600 text-xs">URL or file location</div>
+            
+            {/* Title Row */}
+            <div className="text-gray-800">Title / Name</div>
+            <div className="flex items-center gap-1">
+              <span className="inline-block w-2 h-2 bg-gray-300 rounded-full"></span>
+              <span className="text-gray-600">No</span>
+            </div>
+            <div className="text-gray-600 text-xs">Document name</div>
+            
+            {/* File Type Row */}
+            <div className="text-gray-800">File Type</div>
+            <div className="flex items-center gap-1">
+              <span className="inline-block w-2 h-2 bg-gray-300 rounded-full"></span>
+              <span className="text-gray-600">No</span>
+            </div>
+            <div className="text-gray-600 text-xs">url, s3, or local</div>
+            
+            {/* Description Row */}
+            <div className="text-gray-800">Description</div>
+            <div className="flex items-center gap-1">
+              <span className="inline-block w-2 h-2 bg-gray-300 rounded-full"></span>
+              <span className="text-gray-600">No</span>
+            </div>
+            <div className="text-gray-600 text-xs">About the document</div>
+          </div>
         </div>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <span className="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded">
-            title (required)
-          </span>
-          <span className="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded">
-            file_path (required)
-          </span>
-          <span className="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded">
-            file_source_type: url | s3 | local
-          </span>
-          <span className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded">
-            description (optional)
-          </span>
+        
+        {/* Tip for Excel users */}
+        <div className="p-3 bg-yellow-50 border border-yellow-200 rounded text-xs text-yellow-800">
+          <p className="font-medium mb-1">💡 Tip for Excel users:</p>
+          <p>Paste links as plain text. Excel hyperlinks will not work as expected.</p>
         </div>
       </div>
     </div>

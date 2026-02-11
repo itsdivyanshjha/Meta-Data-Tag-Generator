@@ -1,9 +1,13 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import ProtectedRoute from '@/components/ProtectedRoute'
 import { getJobs, deleteJob, getJobDetail, JobSummary } from '@/lib/api'
+
+function copyToClipboard(text: string) {
+  navigator.clipboard.writeText(text)
+}
 
 function formatDate(dateString: string | null): string {
   if (!dateString) return '-'
@@ -26,18 +30,231 @@ interface JobDetailModalProps {
   onClose: () => void
 }
 
+function DocumentPreviewModal({ doc, onClose }: { doc: any, onClose: () => void }) {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopyTags = () => {
+    if (doc.tags && doc.tags.length > 0) {
+      copyToClipboard(doc.tags.join(', '))
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    }
+  }
+
+  if (!doc) return null
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between bg-gradient-to-r from-blue-50 to-white">
+          <h3 className="text-lg font-semibold text-gray-900">Document Preview: {doc.title}</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 transition-colors">
+            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-hidden flex">
+          {/* Document Viewer - Left Side */}
+          <div className="flex-1 bg-gray-900 flex items-center justify-center overflow-hidden">
+            {doc.file_path && (doc.file_path.endsWith('.pdf') || doc.file_source_type === 'url') ? (
+              <iframe
+                src={doc.file_path}
+                className="w-full h-full border-0"
+                title={doc.title}
+              />
+            ) : doc.file_path?.startsWith('upload://') ? (
+              <div className="text-center text-white p-8">
+                <svg className="mx-auto h-16 w-16 text-gray-400 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                <p className="text-lg font-medium">Preview not available</p>
+                <p className="text-sm text-gray-400 mt-2">Uploaded files cannot be previewed directly</p>
+                <p className="text-xs text-gray-500 mt-1">{doc.file_path}</p>
+              </div>
+            ) : (
+              <div className="text-center text-white p-8">
+                <svg className="mx-auto h-16 w-16 text-gray-400 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                <p className="text-lg font-medium">Preview not available</p>
+                <p className="text-sm text-gray-400 mt-2">This file type cannot be previewed</p>
+              </div>
+            )}
+          </div>
+
+          {/* Document Details - Right Side */}
+          <div className="w-96 bg-white border-l border-gray-200 overflow-y-auto">
+            <div className="p-6 space-y-6">
+            {/* Document Info */}
+            <div>
+              <h4 className="text-xl font-bold text-gray-900 mb-4">{doc.title}</h4>
+              <div className="grid grid-cols-2 gap-4 bg-gray-50 p-4 rounded-lg">
+                <div>
+                  <p className="text-xs text-gray-500 uppercase tracking-wide">File Path</p>
+                  <p className="text-sm font-medium text-gray-900 truncate mt-1">{doc.file_path}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 uppercase tracking-wide">Status</p>
+                  <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium mt-1 ${getStatusBadge(doc.status)}`}>
+                    {doc.status}
+                  </span>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 uppercase tracking-wide">Source Type</p>
+                  <p className="text-sm font-medium text-gray-900 mt-1">{doc.file_source_type}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 uppercase tracking-wide">Processed At</p>
+                  <p className="text-sm font-medium text-gray-900 mt-1">{formatDate(doc.processed_at)}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Tags with Copy */}
+            {doc.tags && doc.tags.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <h5 className="font-semibold text-gray-900">Tags ({doc.tags.length})</h5>
+                  <button
+                    onClick={handleCopyTags}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors"
+                  >
+                    {copied ? (
+                      <>
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                        Copied!
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                        Copy Tags
+                      </>
+                    )}
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {doc.tags.map((tag: string, i: number) => (
+                    <span key={i} className="px-3 py-1.5 bg-blue-100 text-blue-800 text-sm rounded-lg font-medium">
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Extracted Text Preview */}
+            {doc.extracted_text && (
+              <div>
+                <h5 className="font-semibold text-gray-900 mb-3">Extracted Text Preview</h5>
+                <div className="bg-gray-50 p-4 rounded-lg max-h-64 overflow-y-auto">
+                  <p className="text-sm text-gray-700 whitespace-pre-wrap">
+                    {doc.extracted_text.substring(0, 1000)}
+                    {doc.extracted_text.length > 1000 && '...'}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Error Message */}
+            {doc.error_message && (
+              <div className="bg-red-50 border border-red-200 p-4 rounded-lg">
+                <p className="text-sm font-medium text-red-800">Error:</p>
+                <p className="text-sm text-red-600 mt-1">{doc.error_message}</p>
+              </div>
+            )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DocumentItem({ doc, onPreview }: { doc: any, onPreview: (doc: any) => void }) {
+  const [docCopied, setDocCopied] = useState(false)
+
+  const handleCopyDocTags = (docTags: string[]) => {
+    copyToClipboard(docTags.join(', '))
+    setDocCopied(true)
+    setTimeout(() => setDocCopied(false), 2000)
+  }
+
+  return (
+    <div className="p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+      <div className="flex items-start justify-between">
+        <div className="flex-1 min-w-0">
+          <p className="font-medium text-gray-900 truncate">{doc.title}</p>
+          <p className="text-sm text-gray-500 truncate">{doc.file_path}</p>
+        </div>
+        <div className="flex items-center gap-2 ml-2">
+          <button
+            onClick={() => onPreview(doc)}
+            className="text-blue-600 hover:text-blue-800 text-sm font-medium"
+          >
+            Preview
+          </button>
+          <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${getStatusBadge(doc.status)}`}>
+            {doc.status}
+          </span>
+        </div>
+      </div>
+      {doc.tags && doc.tags.length > 0 && (
+        <div className="mt-2">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs text-gray-500">Tags:</span>
+            <button
+              onClick={() => handleCopyDocTags(doc.tags)}
+              className="text-xs text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1"
+            >
+              {docCopied ? (
+                <>
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  Copied
+                </>
+              ) : (
+                <>
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                  Copy
+                </>
+              )}
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {doc.tags.slice(0, 5).map((tag: string, i: number) => (
+              <span key={i} className="px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded">
+                {tag}
+              </span>
+            ))}
+            {doc.tags.length > 5 && (
+              <span className="text-xs text-gray-500">+{doc.tags.length - 5} more</span>
+            )}
+          </div>
+        </div>
+      )}
+      {doc.error_message && (
+        <p className="mt-2 text-sm text-red-600">{doc.error_message}</p>
+      )}
+    </div>
+  )
+}
+
 function JobDetailModal({ jobId, onClose }: JobDetailModalProps) {
   const [job, setJob] = useState<any>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [previewDoc, setPreviewDoc] = useState<any>(null)
 
-  useEffect(() => {
-    if (jobId) {
-      loadJobDetail()
-    }
-  }, [jobId])
-
-  async function loadJobDetail() {
+  const loadJobDetail = useCallback(async () => {
     try {
       setIsLoading(true)
       setError(null)
@@ -48,7 +265,13 @@ function JobDetailModal({ jobId, onClose }: JobDetailModalProps) {
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [jobId])
+
+  useEffect(() => {
+    if (jobId) {
+      loadJobDetail()
+    }
+  }, [jobId, loadJobDetail])
 
   if (!jobId) return null
 
@@ -112,32 +335,7 @@ function JobDetailModal({ jobId, onClose }: JobDetailModalProps) {
                   <h4 className="font-medium text-gray-900 mb-3">Documents ({job.documents.length})</h4>
                   <div className="space-y-2 max-h-64 overflow-y-auto">
                     {job.documents.map((doc: any) => (
-                      <div key={doc.id} className="p-3 bg-gray-50 rounded-lg">
-                        <div className="flex items-start justify-between">
-                          <div className="flex-1 min-w-0">
-                            <p className="font-medium text-gray-900 truncate">{doc.title}</p>
-                            <p className="text-sm text-gray-500 truncate">{doc.file_path}</p>
-                          </div>
-                          <span className={`ml-2 inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${getStatusBadge(doc.status)}`}>
-                            {doc.status}
-                          </span>
-                        </div>
-                        {doc.tags && doc.tags.length > 0 && (
-                          <div className="mt-2 flex flex-wrap gap-1">
-                            {doc.tags.slice(0, 5).map((tag: string, i: number) => (
-                              <span key={i} className="px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded">
-                                {tag}
-                              </span>
-                            ))}
-                            {doc.tags.length > 5 && (
-                              <span className="text-xs text-gray-500">+{doc.tags.length - 5} more</span>
-                            )}
-                          </div>
-                        )}
-                        {doc.error_message && (
-                          <p className="mt-2 text-sm text-red-600">{doc.error_message}</p>
-                        )}
-                      </div>
+                      <DocumentItem key={doc.id} doc={doc} onPreview={setPreviewDoc} />
                     ))}
                   </div>
                 </div>
@@ -146,6 +344,9 @@ function JobDetailModal({ jobId, onClose }: JobDetailModalProps) {
           ) : null}
         </div>
       </div>
+
+      {/* Document Preview Modal */}
+      {previewDoc && <DocumentPreviewModal doc={previewDoc} onClose={() => setPreviewDoc(null)} />}
     </div>
   )
 }
@@ -163,15 +364,7 @@ function HistoryContent() {
   const [typeFilter, setTypeFilter] = useState<string>('all')
   const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest')
 
-  useEffect(() => {
-    loadJobs()
-  }, [])
-
-  useEffect(() => {
-    applyFilters()
-  }, [jobs, statusFilter, typeFilter, sortOrder])
-
-  function applyFilters() {
+  const applyFilters = useCallback(() => {
     let result = [...jobs]
 
     if (statusFilter !== 'all') {
@@ -189,7 +382,15 @@ function HistoryContent() {
     })
 
     setFilteredJobs(result)
-  }
+  }, [jobs, statusFilter, typeFilter, sortOrder])
+
+  useEffect(() => {
+    loadJobs()
+  }, [])
+
+  useEffect(() => {
+    applyFilters()
+  }, [applyFilters])
 
   async function loadJobs() {
     try {

@@ -17,14 +17,14 @@ class DocumentRepository:
     async def create_document(
         self,
         job_id: Optional[UUID],
-        user_id: Optional[UUID],
+        user_id: UUID,  # Now required
         title: str,
         file_path: str,
         file_source_type: str,
         file_size: Optional[int] = None,
         mime_type: Optional[str] = None
     ) -> asyncpg.Record:
-        """Create a new document record"""
+        """Create a new document record for an authenticated user"""
         query = """
             INSERT INTO documents (job_id, user_id, title, file_path, file_source_type,
                                    file_size, mime_type, status)
@@ -41,9 +41,9 @@ class DocumentRepository:
         self,
         documents: List[Dict[str, Any]],
         job_id: Optional[UUID] = None,
-        user_id: Optional[UUID] = None
+        user_id: UUID = None  # Now required
     ) -> List[asyncpg.Record]:
-        """Create multiple document records in batch"""
+        """Create multiple document records in batch for an authenticated user"""
         results = []
         for doc in documents:
             record = await self.create_document(
@@ -188,29 +188,18 @@ class DocumentRepository:
     async def get_recent_documents(
         self,
         limit: int = 50,
-        user_id: Optional[UUID] = None
+        user_id: UUID = None  # Now required
     ) -> List[asyncpg.Record]:
-        """Get recent processed documents"""
-        if user_id:
-            query = """
-                SELECT id, job_id, user_id, title, file_path, file_source_type,
-                       status, tags, processed_at, created_at
-                FROM documents
-                WHERE user_id = $1 AND status IN ('success', 'failed')
-                ORDER BY processed_at DESC NULLS LAST
-                LIMIT $2
-            """
-            return await self.db.fetch(query, user_id, limit)
-        else:
-            query = """
-                SELECT id, job_id, user_id, title, file_path, file_source_type,
-                       status, tags, processed_at, created_at
-                FROM documents
-                WHERE status IN ('success', 'failed')
-                ORDER BY processed_at DESC NULLS LAST
-                LIMIT $1
-            """
-            return await self.db.fetch(query, limit)
+        """Get recent processed documents for authenticated user"""
+        query = """
+            SELECT id, job_id, user_id, title, file_path, file_source_type,
+                   status, tags, processed_at, created_at
+            FROM documents
+            WHERE user_id = $1 AND status IN ('success', 'failed')
+            ORDER BY processed_at DESC NULLS LAST
+            LIMIT $2
+        """
+        return await self.db.fetch(query, user_id, limit)
 
     async def search_documents(
         self,

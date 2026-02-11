@@ -5,6 +5,10 @@ import Link from 'next/link'
 import ProtectedRoute from '@/components/ProtectedRoute'
 import { getDocuments, searchDocuments, getDocumentDetail, DocumentSummary } from '@/lib/api'
 
+function copyToClipboard(text: string) {
+  navigator.clipboard.writeText(text)
+}
+
 function formatDate(dateString: string | null): string {
   if (!dateString) return '-'
   return new Date(dateString).toLocaleString()
@@ -29,14 +33,9 @@ function DocumentDetailModal({ docId, onClose }: DocumentDetailModalProps) {
   const [doc, setDoc] = useState<any>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
 
-  useEffect(() => {
-    if (docId) {
-      loadDocDetail()
-    }
-  }, [docId])
-
-  async function loadDocDetail() {
+  const loadDocDetail = useCallback(async () => {
     try {
       setIsLoading(true)
       setError(null)
@@ -46,6 +45,20 @@ function DocumentDetailModal({ docId, onClose }: DocumentDetailModalProps) {
       setError(err.message || 'Failed to load document details')
     } finally {
       setIsLoading(false)
+    }
+  }, [docId])
+
+  useEffect(() => {
+    if (docId) {
+      loadDocDetail()
+    }
+  }, [docId, loadDocDetail])
+
+  const handleCopyTags = () => {
+    if (doc?.tags && doc.tags.length > 0) {
+      copyToClipboard(doc.tags.join(', '))
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
     }
   }
 
@@ -105,7 +118,29 @@ function DocumentDetailModal({ docId, onClose }: DocumentDetailModalProps) {
               {/* Tags */}
               {doc.tags && doc.tags.length > 0 && (
                 <div>
-                  <p className="text-sm text-gray-500 mb-2">Tags ({doc.tags.length})</p>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-sm text-gray-500">Tags ({doc.tags.length})</p>
+                    <button
+                      onClick={handleCopyTags}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors"
+                    >
+                      {copied ? (
+                        <>
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                          Copied!
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                          </svg>
+                        Copy Tags
+                        </>
+                      )}
+                    </button>
+                  </div>
                   <div className="flex flex-wrap gap-2">
                     {doc.tags.map((tag: string, i: number) => (
                       <span key={i} className="px-3 py-1 bg-blue-100 text-blue-800 text-sm rounded-lg">

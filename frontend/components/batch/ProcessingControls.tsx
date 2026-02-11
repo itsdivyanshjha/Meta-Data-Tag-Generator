@@ -28,12 +28,8 @@ export default function ProcessingControls() {
       return
     }
     
-    // Validate column mapping
+    // Validate column mapping - only file_path is required
     const mapping = getColumnMapping()
-    if (!mapping || !Object.values(mapping).includes('title')) {
-      setError('Could not find a "title" column. Please ensure your CSV has a title column.')
-      return
-    }
     if (!Object.values(mapping).includes('file_path')) {
       setError('Could not find a "file_path" column. Please ensure your CSV has a file path column.')
       return

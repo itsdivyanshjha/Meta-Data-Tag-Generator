@@ -5,7 +5,7 @@ from app.services.pdf_extractor import PDFExtractor
 from app.services.ai_tagger import AITagger
 from app.services.exclusion_parser import ExclusionListParser
 from app.repositories import JobRepository, DocumentRepository
-from app.dependencies.auth import get_optional_user
+from app.dependencies.auth import get_current_active_user
 from typing import Optional
 import time
 import json
@@ -28,20 +28,21 @@ async def process_single_pdf(
     config: str = Form(...),
     exclusion_file: Optional[UploadFile] = File(None),
     pdf_url: Optional[str] = Form(None),
-    current_user: Optional[dict] = Depends(get_optional_user)
+    current_user: dict = Depends(get_current_active_user)
 ):
     """
-    Process single PDF and generate tags with automatic OCR support and optional exclusion list
+    Process single PDF and generate tags with automatic OCR support and optional exclusion list.
+    Requires authentication.
 
     Args:
         pdf_file: Uploaded PDF file (optional if pdf_url provided)
         config: JSON string of TaggingConfig
         exclusion_file: Optional file containing words/phrases to exclude from tags (.txt or .pdf)
         pdf_url: Optional URL to download PDF from (alternative to pdf_file)
-        current_user: Optional authenticated user (for persistence)
+        current_user: Authenticated user
     """
     start_time = time.time()
-    user_id = current_user.get("id") if current_user else None
+    user_id = current_user["id"]
     file_path = ""
     
     try:

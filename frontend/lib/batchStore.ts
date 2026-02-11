@@ -7,6 +7,7 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 import Papa from 'papaparse'
+import * as XLSX from 'xlsx'
 import { useAuthStore } from './authStore'
 import { useNotificationStore } from './notificationStore'
 
@@ -333,17 +334,74 @@ export const useBatchStore = create<BatchState>((set, get) => ({
   
   importCSV: async (file) => {
     return new Promise((resolve, reject) => {
-      Papa.parse(file, {
-        header: true,
-        skipEmptyLines: true,
-        complete: (results) => {
-          const headers = results.meta.fields || []
-          
-          if (headers.length === 0) {
-            reject(new Error('No columns found in CSV'))
-            return
+      const fileName = file.name.toLowerCase()
+      const isExcel = fileName.endsWith('.xlsx') || fileName.endsWith('.xls')
+      
+      if (isExcel) {
+        // Handle Excel files
+        const reader = new FileReader()
+        reader.onload = (e) => {
+          try {
+            const data = new Uint8Array(e.target?.result as ArrayBuffer)
+            const workbook = XLSX.read(data, { type: 'array' })
+            
+            // Get first sheet
+            const sheetName = workbook.SheetNames[0]
+            if (!sheetName) {
+              reject(new Error('No sheets found in Excel file'))
+              return
+            }
+            
+            const worksheet = workbook.Sheets[sheetName]
+            const rows = XLSX.utils.sheet_to_json(worksheet, { 
+              defval: '',  // Use empty string for empty cells
+              blankrows: false 
+            }) as Record<string, string>[]
+            
+            if (rows.length === 0) {
+              reject(new Error('No data found in Excel sheet'))
+              return
+            }
+            
+            // Get headers from first row keys
+            const headers = Object.keys(rows[0])
+            
+            if (headers.length === 0) {
+              reject(new Error('No columns found in Excel file'))
+              return
+            }
+            
+            processData(headers, rows, 'Excel')
+          } catch (err) {
+            reject(err)
           }
-          
+        }
+        reader.onerror = () => reject(new Error('Failed to read Excel file'))
+        reader.readAsArrayBuffer(file)
+      } else {
+        // Handle CSV files with PapaParse
+        Papa.parse(file, {
+          header: true,
+          skipEmptyLines: true,
+          complete: (results) => {
+            const headers = results.meta.fields || []
+            
+            if (headers.length === 0) {
+              reject(new Error('No columns found in CSV'))
+              return
+            }
+            
+            processData(headers, results.data as Record<string, string>[], 'CSV')
+          },
+          error: (error) => {
+            reject(new Error(`CSV parsing error: ${error.message}`))
+          }
+        })
+      }
+      
+      // Common data processing for both CSV and Excel
+      function processData(headers: string[], rows: Record<string, string>[], source: string) {
+        try {
           // Create column definitions
           const columns: ColumnDefinition[] = headers.map((header, idx) => {
             const lowerHeader = header.toLowerCase().trim()
@@ -361,11 +419,11 @@ export const useBatchStore = create<BatchState>((set, get) => ({
           })
           
           // Create document rows
-          const documents: DocumentRow[] = (results.data as Record<string, string>[]).map((row, idx) => ({
+          const documents: DocumentRow[] = rows.map((row, idx) => ({
             id: uuidv4(),
             rowNumber: idx + 1,
             data: Object.fromEntries(
-              columns.map(col => [col.id, row[col.originalName] || ''])
+              columns.map(col => [col.id, String(row[col.originalName] || '')])
             ),
             status: 'pending' as DocumentStatus
           }))
@@ -397,12 +455,12 @@ export const useBatchStore = create<BatchState>((set, get) => ({
             validationResults: {}
           })
           
+          console.log(`✅ Loaded ${documents.length} documents from ${source} file`)
           resolve()
-        },
-        error: (error) => {
-          reject(error)
+        } catch (err) {
+          reject(err)
         }
-      })
+      }
     })
   },
   
@@ -667,6 +725,13 @@ export const useBatchStore = create<BatchState>((set, get) => ({
       
       console.log(`Validating ${paths.length} paths via /api/batch/validate-paths`)
       
+      // Get auth token
+      const token = useAuthStore.getState().getAccessToken()
+      if (!token) {
+        set({ isValidating: false })
+        throw new Error('Please log in to validate paths')
+      }
+      
       // Call validation API with timeout
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
       const controller = new AbortController()
@@ -675,7 +740,10 @@ export const useBatchStore = create<BatchState>((set, get) => ({
       try {
         const response = await fetch(`${apiUrl}/api/batch/validate-paths`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
           body: JSON.stringify({ paths }),
           signal: controller.signal
         })

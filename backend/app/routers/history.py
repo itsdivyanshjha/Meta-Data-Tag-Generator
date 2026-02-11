@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from datetime import datetime
 
 from app.repositories import JobRepository, DocumentRepository
-from app.dependencies.auth import get_optional_user, get_current_active_user
+from app.dependencies.auth import get_current_active_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -120,29 +120,18 @@ async def list_jobs(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     status: Optional[str] = Query(default=None),
-    current_user: Optional[dict] = Depends(get_optional_user)
+    current_user: dict = Depends(get_current_active_user)
 ):
     """
-    List processing jobs.
-
-    - If authenticated, returns:
-      1. Jobs for the current user
-      2. Anonymous jobs (user_id = NULL) created in this session
-    - If not authenticated, returns recent jobs (anonymous mode)
+    List processing jobs for the authenticated user.
+    Requires authentication.
     """
     try:
-        if current_user:
-            user_id = current_user["id"]
-            jobs = await job_repo.get_jobs_by_user(user_id, limit, offset, status)
-            total = await job_repo.count_user_jobs(user_id)
-            
-            # Also include anonymous jobs (user_id = NULL) for user context
-            # This handles cases where jobs were created before authentication
-            logger.info(f"Fetching jobs for authenticated user {user_id}. Found {len(jobs)} user jobs.")
-        else:
-            jobs = await job_repo.get_recent_jobs(limit, offset)
-            total = len(jobs)
-            logger.info(f"Fetching jobs for anonymous user. Found {len(jobs)} recent jobs.")
+        user_id = current_user["id"]
+        jobs = await job_repo.get_jobs_by_user(user_id, limit, offset, status)
+        total = await job_repo.count_user_jobs(user_id)
+        
+        logger.info(f"Fetching jobs for authenticated user {user_id}. Found {len(jobs)} user jobs.")
 
         job_summaries = [
             JobSummary(
@@ -174,10 +163,11 @@ async def list_jobs(
 @router.get("/jobs/{job_id}", response_model=JobDetail)
 async def get_job_detail(
     job_id: UUID,
-    current_user: Optional[dict] = Depends(get_optional_user)
+    current_user: dict = Depends(get_current_active_user)
 ):
     """
     Get detailed information about a specific job including its documents.
+    Requires authentication and ownership.
     """
     try:
         job = await job_repo.get_job_by_id(job_id)
@@ -185,8 +175,8 @@ async def get_job_detail(
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
 
-        # Check ownership if user is authenticated
-        if current_user and job["user_id"] and job["user_id"] != current_user["id"]:
+        # Check ownership: Allow user-owned jobs OR anonymous jobs (legacy data)
+        if job["user_id"] is not None and job["user_id"] != current_user["id"]:
             raise HTTPException(status_code=403, detail="Not authorized to view this job")
 
         # Fetch documents for this job
@@ -231,16 +221,14 @@ async def get_job_detail(
 @router.get("/documents", response_model=DocumentListResponse)
 async def list_recent_documents(
     limit: int = Query(default=50, ge=1, le=100),
-    current_user: Optional[dict] = Depends(get_optional_user)
+    current_user: dict = Depends(get_current_active_user)
 ):
     """
-    List recent processed documents.
-
-    - If authenticated, returns documents for the current user
-    - If not authenticated, returns recent documents
+    List recent processed documents for the authenticated user.
+    Requires authentication.
     """
     try:
-        user_id = current_user["id"] if current_user else None
+        user_id = current_user["id"]
         documents = await doc_repo.get_recent_documents(limit, user_id)
 
         doc_summaries = [
@@ -270,10 +258,11 @@ async def list_recent_documents(
 @router.get("/documents/{doc_id}")
 async def get_document_detail(
     doc_id: UUID,
-    current_user: Optional[dict] = Depends(get_optional_user)
+    current_user: dict = Depends(get_current_active_user)
 ):
     """
     Get detailed information about a specific document.
+    Requires authentication and ownership.
     """
     try:
         doc = await doc_repo.get_document_by_id(doc_id)
@@ -281,8 +270,8 @@ async def get_document_detail(
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
 
-        # Check ownership if user is authenticated
-        if current_user and doc["user_id"] and doc["user_id"] != current_user["id"]:
+        # Check ownership
+        if doc["user_id"] != current_user["id"]:
             raise HTTPException(status_code=403, detail="Not authorized to view this document")
 
         return {
@@ -322,8 +311,8 @@ async def delete_job(
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
 
-        # Check ownership
-        if job["user_id"] != current_user["id"]:
+        # Check ownership: Allow deletion of user-owned jobs OR anonymous jobs (legacy data)
+        if job["user_id"] is not None and job["user_id"] != current_user["id"]:
             raise HTTPException(status_code=403, detail="Not authorized to delete this job")
 
         success = await job_repo.delete_job(job_id)

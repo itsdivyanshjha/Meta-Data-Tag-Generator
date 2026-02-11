@@ -17,12 +17,12 @@ class JobRepository:
 
     async def create_job(
         self,
-        user_id: Optional[UUID] = None,
+        user_id: UUID,  # Now required
         job_type: str = "batch",
         total_documents: int = 0,
         config: Optional[Dict[str, Any]] = None
     ) -> asyncpg.Record:
-        """Create a new job"""
+        """Create a new job for an authenticated user"""
         query = """
             INSERT INTO jobs (user_id, job_type, status, total_documents, config)
             VALUES ($1, $2, 'pending', $3, $4)
@@ -51,7 +51,7 @@ class JobRepository:
         offset: int = 0,
         status: Optional[str] = None
     ) -> List[asyncpg.Record]:
-        """Get jobs for a specific user, including anonymous jobs (for backward compatibility)"""
+        """Get jobs for a specific user (includes legacy anonymous jobs for viewing)"""
         if status:
             query = """
                 SELECT id, user_id, job_type, status, total_documents, processed_count,
@@ -165,6 +165,6 @@ class JobRepository:
         return result == "DELETE 1"
 
     async def count_user_jobs(self, user_id: UUID) -> int:
-        """Count total jobs for a user"""
-        query = "SELECT COUNT(*) FROM jobs WHERE user_id = $1"
+        """Count total jobs for a user (includes legacy anonymous jobs)"""
+        query = "SELECT COUNT(*) FROM jobs WHERE user_id = $1 OR user_id IS NULL"
         return await self.db.fetchval(query, user_id)

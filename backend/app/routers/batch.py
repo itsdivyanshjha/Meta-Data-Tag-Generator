@@ -8,7 +8,7 @@ Provides endpoints for:
 - Legacy CSV upload processing
 """
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, Query, Depends
 from fastapi.responses import JSONResponse
 from app.models import (
     BatchProcessResponse, 
@@ -25,6 +25,7 @@ from app.services.async_batch_processor import batch_processor, AsyncBatchProces
 from app.services.exclusion_parser import ExclusionListParser
 from app.services.file_handler import FileHandler
 from app.services.auth_service import AuthService
+from app.dependencies.auth import get_current_active_user
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 import time
@@ -108,12 +109,18 @@ async def batch_progress_websocket(websocket: WebSocket, job_id: str):
     await websocket.accept()
     logger.info(f"WebSocket connected for job {job_id}")
     
-    # Extract user_id from authentication token
+    # Extract user_id from authentication token - REQUIRED
     user_id = await get_user_from_websocket(websocket)
-    if user_id:
-        logger.info(f"Authenticated user {user_id} for job {job_id}")
-    else:
-        logger.info(f"Anonymous user for job {job_id}")
+    if not user_id:
+        logger.warning(f"Unauthenticated WebSocket connection attempt for job {job_id}")
+        await websocket.send_json({
+            "error": "Authentication required",
+            "job_id": job_id
+        })
+        await websocket.close(code=1008)  # Policy violation
+        return
+    
+    logger.info(f"Authenticated user {user_id} for job {job_id}")
     
     try:
         # Wait for the batch start request
@@ -250,9 +257,13 @@ async def batch_progress_websocket(websocket: WebSocket, job_id: str):
 # ===== PATH VALIDATION =====
 
 @router.post("/validate-paths", response_model=PathValidationResponse)
-async def validate_paths(request: PathValidationRequest):
+async def validate_paths(
+    request: PathValidationRequest,
+    current_user: dict = Depends(get_current_active_user)
+):
     """
-    Validate file paths before processing
+    Validate file paths before processing.
+    Requires authentication.
     
     Performs quick checks to verify paths are accessible:
     - URL: HTTP HEAD request
@@ -456,10 +467,12 @@ def _validate_local(path: str) -> PathValidationResult:
 async def process_batch_csv(
     csv_file: UploadFile = File(...),
     config: str = Form(...),
-    exclusion_file: Optional[UploadFile] = File(None)
+    exclusion_file: Optional[UploadFile] = File(None),
+    current_user: dict = Depends(get_current_active_user)
 ):
     """
-    Process batch CSV with multiple documents and optional exclusion list
+    Process batch CSV with multiple documents and optional exclusion list.
+    Requires authentication.
     
     This is the legacy endpoint that processes synchronously.
     For real-time progress, use the WebSocket endpoint instead.
@@ -530,9 +543,12 @@ async def process_batch_csv(
 # ===== CSV TEMPLATE =====
 
 @router.get("/template")
-async def get_csv_template():
+async def get_csv_template(
+    current_user: dict = Depends(get_current_active_user)
+):
     """
-    Get a sample CSV template for batch processing
+    Get a sample CSV template for batch processing.
+    Requires authentication.
     """
     template = """title,description,file_source_type,file_path,publishing_date,file_size
 "Training Manual","PMSPECIAL training document",url,https://example.com/doc1.pdf,2025-01-15,1.2MB
