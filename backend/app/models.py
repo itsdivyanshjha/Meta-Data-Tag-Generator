@@ -136,12 +136,16 @@ class WebSocketProgressUpdate(BaseModel):
 
 
 class BatchStartRequest(BaseModel):
-    """Request to start batch processing via WebSocket"""
+    """Request to start batch processing"""
     documents: List[Dict[str, Any]]
     config: TaggingConfig
     column_mapping: Dict[str, str] = Field(
         default={},
         description="Maps column IDs to system field names (title, file_path, file_source_type, description)"
+    )
+    job_id: Optional[str] = Field(
+        default=None,
+        description="Optional client-generated job ID. Server generates one if not provided."
     )
 
 

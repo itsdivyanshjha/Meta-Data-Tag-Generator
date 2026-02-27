@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     minio_bucket: str = "metatag-files"
     minio_secure: bool = False
 
+    # Redis Settings
+    redis_url: str = "redis://localhost:6379/0"
+
     # JWT Settings (Phase 2)
     jwt_secret_key: str = "your-super-secret-jwt-key-change-in-production"
     jwt_algorithm: str = "HS256"

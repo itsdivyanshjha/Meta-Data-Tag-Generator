@@ -1,4 +1,5 @@
 import openai
+import json
 from typing import List, Dict, Any, Optional, Set
 import re
 import logging
@@ -56,6 +57,24 @@ class AITagger:
         'general', 'basic', 'standard', 'normal', 'regular', 'common', 'main', 'other',
     }
     
+    # Roman numeral pattern — document structure artifacts (Chapter I, Section XXI etc.)
+    # Full regex covering i–mmmcmxcix so roman-numeral-only tags are always rejected.
+    _ROMAN_RE = re.compile(
+        r'^m{0,4}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})$',
+        re.IGNORECASE
+    )
+
+    # Minimal universal noise set — only terms that are ALWAYS meaningless regardless
+    # of document type. Keep this list as small as possible; the LLM prompt handles
+    # the rest. Do NOT add domain-specific terms here.
+    _MINIMAL_GENERIC_TERMS = frozenset({
+        'contact', 'email', 'phone', 'address',
+        'document', 'information', 'data', 'details', 'pdf', 'report',
+        'government', 'india', 'language', 'publication',
+        'contact details', 'contact information',
+        'phone number', 'email address',
+    })
+
     # Patterns that indicate low-value procedural tags (compiled for performance)
     LOW_VALUE_PATTERNS = [
         # Tender/bid procedural terms
@@ -124,10 +143,11 @@ class AITagger:
             max_retries=settings.api_max_retries,
         )
         
-        # Track rate limit state for adaptive backoff
+        # Adaptive rate limit state
         self._rate_limit_delay = settings.api_retry_delay
         self._last_rate_limit_time = 0
-        self._rate_limit_hit_count = 0  # Track consecutive rate limit hits
+        self._rate_limit_hit_count = 0
+        self._consecutive_successes = 0  # Track successes for delay decay
         
         # Track if model doesn't support system messages
         self._no_system_message = False
@@ -158,74 +178,65 @@ class AITagger:
             dict with tags list and metadata
         """
         try:
-            # Extract anchor terms once (used across retries)
-            anchor_terms = self._extract_anchor_terms(
-                title=title,
-                description=description,
-                content=content,
-                max_terms=max(12, num_tags * 4)
-            )
-            if anchor_terms:
-                logger.info(f"🧭 Extracted {len(anchor_terms)} context anchors: {anchor_terms[:8]}")
-            
+            # Skip API call if content is empty
+            if not content or len(content.strip()) < 50:
+                logger.warning("Content too short or empty, skipping API call")
+                return {
+                    "success": False,
+                    "error": "Insufficient text content for tag generation",
+                    "tags": []
+                }
+
             if language_name:
                 logger.info(f"🌐 Document language: {language_name} ({detected_language})")
             if quality_info:
                 logger.info(f"📊 Document quality: {quality_info.get('quality_tier', 'unknown')} ({quality_info.get('type', 'unknown')})")
-            
-            # RETRY LOOP: Guarantee we return the requested number of tags
-            max_attempts = 3
-            buffer_multipliers = [4.0, 6.0, 8.0]  # Escalating buffer for each attempt
-            
-            all_collected_tags: List[str] = []  # Accumulate tags across retries
-            final_tags: List[str] = []
-            last_response = None
+
+            # Cap how many tags we ask for based on content length.
+            # One tag per ~8 words is generous; prevents hallucination on short content.
+            content_words = len(content.split()) if content else 0
+            max_derivable = max(num_tags, content_words // 8) if content_words > 0 else num_tags * 2
+
+            # Small buffer: ask for a bit more than needed to absorb exclusion filtering,
+            # but never so many that the LLM has to hallucinate to fill the quota.
+            buffer = min(num_tags + 6, max_derivable)
+
+            all_collected_tags: List[str] = []
             total_tokens_used = 0
-            
+            max_attempts = 2  # Tiered JSON is high quality; rarely needs a retry
+
             for attempt in range(max_attempts):
-                buffer_multiplier = buffer_multipliers[min(attempt, len(buffer_multipliers) - 1)]
-                # Calculate how many MORE tags we need
                 tags_still_needed = num_tags - len(all_collected_tags)
                 if tags_still_needed <= 0:
                     break
-                    
-                requested_tags = int(tags_still_needed * buffer_multiplier)
-                
-                logger.info(f"🎯 Attempt {attempt + 1}/{max_attempts}: Need {tags_still_needed} more tags | Requesting: {requested_tags} ({buffer_multiplier}x buffer)")
-                logger.info(f"   Active filters: gibberish detection, generic terms, exclusion list ({len(self.exclusion_words)} words)")
 
-                # Build prompt with exclusion hint for already collected tags
-                exclude_already_collected = list(set(all_collected_tags))
-                prompt = self._build_prompt(
-                    title,
-                    description,
-                    content,
-                    requested_tags,
-                    detected_language,
-                    language_name,
-                    quality_info,
-                    anchor_terms=anchor_terms,
-                    already_generated=exclude_already_collected if attempt > 0 else None
+                requested_tags = min(tags_still_needed + 6, buffer)
+                logger.info(
+                    f"🎯 Attempt {attempt + 1}/{max_attempts}: need {tags_still_needed}, "
+                    f"requesting {requested_tags} (content: {content_words} words, "
+                    f"exclusions: {len(self.exclusion_words)})"
                 )
-                
-                # Check if we need to wait due to rate limiting
+
+                already = list(set(all_collected_tags)) if attempt > 0 else None
+                prompt = self._build_prompt(
+                    title, description, content, requested_tags,
+                    detected_language, language_name, quality_info,
+                    already_generated=already
+                )
+
+                # Rate-limit backoff
                 current_time = time.time()
                 if current_time - self._last_rate_limit_time < self._rate_limit_delay:
                     wait_time = self._rate_limit_delay - (current_time - self._last_rate_limit_time)
-                    logger.info(f"⏳ Rate limit backoff: waiting {wait_time:.2f}s before request")
+                    logger.info(f"⏳ Rate limit backoff: waiting {wait_time:.2f}s")
                     time.sleep(wait_time)
-            
-                # System message - focus on SEARCH UTILITY
-                system_content = """You are a document search-tagging expert. Generate tags that help users FIND this specific document among thousands of similar ones.
 
-RULES:
-1. Tags must come from REAL content in the document - never invent placeholders
-2. Output: comma-separated lowercase tags, 1-4 words each, hyphenated
-3. Think: "What would someone type into a search bar to find THIS document?"
-4. Focus on the document's SUBJECT MATTER and IDENTITY, not incidental details
-
-GOOD search tags: "substance-abuse-prevention", "nisd-vacancy-2024", "gerontology", "ncsc-annual-report"
-BAD tags (not searchable): "rs-50000", "experience-3-5-years", "sector-10", "plot-no-g-2", "contractual-basis\""""
+                system_content = (
+                    "You are a document search-tagging expert. "
+                    "Your job is to identify the most specific, identifying terms in a document "
+                    "so that a user can find it via search. "
+                    "Always respond with valid JSON only — no prose, no markdown fences."
+                )
                 
                 try:
                     # Build messages - skip system message if model doesn't support it
@@ -244,8 +255,8 @@ BAD tags (not searchable): "rs-50000", "experience-3-5-years", "sector-10", "plo
                     response = self.client.chat.completions.create(
                         model=self.model_name,
                         messages=messages,
-                        max_tokens=500,  # Increased for more tags
-                        temperature=0.3 + (attempt * 0.1)  # Slightly increase creativity on retries
+                        max_tokens=700,
+                        temperature=0.2 + (attempt * 0.1)
                     )
                     last_response = response
                 except openai.BadRequestError as e:
@@ -312,8 +323,7 @@ BAD tags (not searchable): "rs-50000", "experience-3-5-years", "sector-10", "plo
                         requested_tags,
                         detected_language,
                         language_name,
-                        quality_info,
-                        anchor_terms=anchor_terms
+                        quality_info
                     )
 
                     response = self.client.chat.completions.create(
@@ -321,12 +331,12 @@ BAD tags (not searchable): "rs-50000", "experience-3-5-years", "sector-10", "plo
                         messages=[
                             {
                                 "role": "system",
-                                "content": "You are a document tagging expert. Generate ENGLISH tags only. Return comma-separated lowercase tags."
+                                "content": "You are a document tagging expert. Generate ENGLISH tags only. Return valid JSON: {\"names\":[...],\"subjects\":[...],\"context\":[...]}"
                             },
                             {"role": "user", "content": prompt_safe}
                         ],
-                        max_tokens=500,
-                        temperature=0.3
+                        max_tokens=700,
+                        temperature=0.2
                     )
                     last_response = response
                 
@@ -366,14 +376,12 @@ BAD tags (not searchable): "rs-50000", "experience-3-5-years", "sector-10", "plo
                     logger.warning(f"⚠️ Only {len(all_collected_tags)} tags after attempt {attempt + 1}, will retry...")
             
             # END OF RETRY LOOP
-            
-            # Select best tags by specificity/relevance/diversity
+
+            # Deduplicate and take the first num_tags in priority order.
+            # The LLM already ordered them: names → subjects → context.
             final_tags = self._select_best_tags(
                 tags=all_collected_tags,
-                num_tags=num_tags,
-                anchor_terms=anchor_terms,
-                title=title,
-                description=description
+                num_tags=num_tags
             )
             
             # Final check - log if still short
@@ -382,17 +390,27 @@ BAD tags (not searchable): "rs-50000", "experience-3-5-years", "sector-10", "plo
                 logger.warning(f"⚠️ SHORT {shortage} tags after {max_attempts} attempts! Returning {len(final_tags)} instead of {num_tags}")
             
             logger.info(f"✅ Final: {len(final_tags)}/{num_tags} tags: {final_tags}")
-            
+
+            # Decay rate limit delay after successful generation
+            self._consecutive_successes += 1
+            if self._consecutive_successes >= 3 and self._rate_limit_delay > settings.api_retry_delay:
+                self._rate_limit_delay = max(
+                    settings.api_retry_delay,
+                    self._rate_limit_delay * 0.8
+                )
+                self._consecutive_successes = 0
+                logger.info(f"📉 Rate limit delay decayed to {self._rate_limit_delay:.2f}s after consecutive successes")
+
             return {
                 "success": True,
                 "tags": final_tags,
-                "raw_response": tags_text if 'tags_text' in dir() else "",
+                "raw_response": tags_text if 'tags_text' in locals() else "",
                 "tokens_used": total_tokens_used,
                 "tags_requested": num_tags,
                 "tags_returned": len(final_tags),
                 "tags_parsed": len(all_collected_tags),
                 "filtering_stats": {
-                    "attempts": attempt + 1 if 'attempt' in dir() else 1,
+                    "attempts": attempt + 1 if 'attempt' in locals() else 1,
                     "total_collected": len(all_collected_tags),
                     "final": len(final_tags),
                     "target_met": len(final_tags) >= num_tags
@@ -406,7 +424,8 @@ BAD tags (not searchable): "rs-50000", "experience-3-5-years", "sector-10", "plo
                 "tags": []
             }
         except openai.RateLimitError as e:
-            # Track consecutive rate limit hits
+            # Reset success counter and track rate limit hits
+            self._consecutive_successes = 0
             self._rate_limit_hit_count += 1
             
             # Exponential backoff for rate limits (capped at 2 minutes for free tier)
@@ -651,15 +670,15 @@ BAD tags (not searchable): "rs-50000", "experience-3-5-years", "sector-10", "plo
             return ""  # High quality - no special instruction needed
 
     def _normalize_phrase_to_tag(self, phrase: str) -> str:
-        """Normalize arbitrary phrase into lowercase hyphenated tag format."""
+        """Normalize arbitrary phrase into lowercase space-separated tag format."""
         if not phrase:
             return ""
 
         normalized = phrase.lower()
         normalized = re.sub(r'[^a-z0-9\s\-\/]', ' ', normalized)
-        normalized = normalized.replace('/', '-')
-        normalized = re.sub(r'\s+', '-', normalized)
-        normalized = re.sub(r'-{2,}', '-', normalized).strip('-')
+        normalized = normalized.replace('/', ' ')
+        normalized = normalized.replace('-', ' ')
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
         return normalized
 
     def _tokenize_keywords(self, text: str) -> List[str]:
@@ -814,81 +833,74 @@ BAD tags (not searchable): "rs-50000", "experience-3-5-years", "sector-10", "plo
         already_generated: Optional[List[str]] = None
     ) -> str:
         """
-        Build optimized prompt - 60% shorter, more effective, document-type aware
-        
-        Key improvements:
-        - Document type detection for specialized prompting
-        - Quality-aware instructions
-        - Positive framing (show good examples, not bad)
-        - Clear hierarchy (TASK → RULES → EXAMPLES)
-        - Removed repetition
-        - Support for retry with already_generated tags to avoid duplicates
+        Build a tiered JSON prompt.
+
+        Asks the LLM to categorise tags into three priority tiers:
+          names    — specific named things (programs, schemes, acts + year, orgs)
+          subjects — what the document is about (topic, beneficiary, purpose)
+          context  — supporting identifiers (year, portal, reference number)
+
+        The LLM's ordering is trusted directly; no re-ranking is applied downstream.
         """
-        # Sanitize inputs
         title = self._sanitize_text_for_api(title)
         description = self._sanitize_text_for_api(description)
         content = self._sanitize_text_for_api(content)
-        
-        # Detect document type for targeted prompting
-        doc_type = self._detect_document_type(title, description, content)
-        type_guidance = self._get_document_type_guidance(doc_type)
-        
-        # Build representative context instead of only leading content.
-        content_preview = self._build_content_preview(content)
 
-        # Extract or reuse anchor terms for context-specific tagging.
-        anchors = anchor_terms or self._extract_anchor_terms(title, description, content)
-        anchor_hint = ""
-        if anchors:
-            anchor_hint = f"\nKey terms found: {', '.join(anchors[:12])}"
-        
-        # Build language context (concise)
-        language_hint = ""
-        if language_name and detected_language != 'en':
-            language_hint = f" [Document in {language_name} - translate key terms to English]"
-        
-        # Quality-based adjustments
+        content_preview = self._build_content_preview(content)
         quality_hint = self._get_quality_adjusted_instruction(quality_info)
 
-        # Exclusion list hint for the AI
+        # Tier size guidance (soft targets, not hard limits)
+        n_names    = max(1, round(num_tags * 0.50))
+        n_subjects = max(1, round(num_tags * 0.30))
+        n_action   = max(1, num_tags - n_names - n_subjects)
+
+        language_hint = ""
+        if language_name and detected_language != 'en':
+            language_hint = (
+                f"\nDocument language: {language_name}. "
+                "Translate all named entities and key terms to English in your output."
+            )
+
         exclusion_hint = ""
         if self.exclusion_words:
-            sample_excluded = list(self.exclusion_words)[:12]
-            exclusion_hint = f"\nExclude tags containing: {', '.join(sample_excluded)}"
+            sample = list(self.exclusion_words)[:15]
+            exclusion_hint = (
+                f"\nDo NOT generate tags containing any of these excluded terms: "
+                f"{', '.join(sample)} (and similar)."
+            )
 
-        # Already generated tags hint (for retry attempts)
-        already_generated_hint = ""
+        already_hint = ""
         if already_generated:
-            already_generated_hint = f"\nAlready used (skip these): {', '.join(already_generated[:15])}"
+            already_hint = (
+                f"\nAlready generated — skip these entirely: "
+                f"{', '.join(already_generated[:15])}"
+            )
 
-        # BUILD PROMPT - focused on search retrieval utility
-        prompt = f"""Generate exactly {num_tags} search tags for this document.{language_hint}{quality_hint}
+        prompt = f"""Analyze the document below and return exactly {num_tags} search tags as a JSON object.{language_hint}{quality_hint}
 
-These tags will be used in a document management system. Generate tags that someone would
-actually TYPE INTO A SEARCH BAR to find this specific document among thousands of similar ones.
-
----
+DOCUMENT:
 Title: {title}
 {f'Description: {description}' if description else ''}
 
 {content_preview}
----
 
-Distribute your {num_tags} tags across these categories:
-- IDENTITY: Issuing organization name/acronym, document type with date or reference number
-- SUBJECT: Specific topics, programs, schemes, domains, beneficiary groups covered
-- DISTINGUISHING: Named entities, specific provisions, or unique aspects that separate this from similar documents
+Return ONLY a valid JSON object — no prose, no markdown, no explanation:
+{{
+  "names":    [...],
+  "subjects": [...],
+  "actions":  [...]
+}}
 
-{type_guidance}{anchor_hint}{exclusion_hint}{already_generated_hint}
+Tier rules (fill each tier; combined total = {num_tags}):
+- "names"    → Specific NAMED things: program/scheme/initiative names, acts (abbreviated, e.g. "rights act 2019"), specific organisations by their actual name. ~{n_names} tags. HIGHEST priority.
+- "subjects" → What the document is about: beneficiary groups, domain, core topic. ~{n_subjects} tags.
+- "actions"  → What the document does: purpose like "expression of interest", "recruitment", "guidelines", "circular". ~{n_action} tags.
 
-AVOID tags that appear in EVERY similar document (they don't help narrow a search):
-- Salary or compensation amounts
-- Generic experience or age requirements
-- Physical address fragments like plot numbers, sector numbers, pin codes
-- Procedural boilerplate like application-form, contractual-basis, last-date
-- Generic structural labels like autonomous-body, recognized-university
-
-Output exactly {num_tags} tags, comma-separated, lowercase, hyphenated. No explanations."""
+Tag format rules:
+- 1–4 words, all lowercase, space-separated (no hyphens, no underscores).
+- Every tag must come from actual text in the document — no invented terms.
+- NO dates, years, or reference numbers — these are not search tags.
+- NO bare section numbers, NO generic legal boilerplate (memorandum of association, articles of association).{exclusion_hint}{already_hint}"""
 
         return prompt
 
@@ -1032,72 +1044,29 @@ Output exactly {num_tags} tags, comma-separated, lowercase, hyphenated. No expla
         self,
         tags: List[str],
         num_tags: int,
-        anchor_terms: Optional[List[str]],
-        title: str,
-        description: str
+        **kwargs  # absorb legacy keyword arguments (anchor_terms, title, description)
     ) -> List[str]:
         """
-        Select final tags via ranking + diversity, rather than preserving model output order.
-        Tags are already cleaned/normalized by _parse_tags, so we use them as-is.
+        Deduplicate and return the first num_tags in the order they arrived.
+
+        Tags come out of _parse_tags in tier-priority order (names → subjects → context)
+        because the LLM JSON response is flattened in that order. No re-ranking needed —
+        the model already put the most identifying tags first.
         """
         if not tags or num_tags <= 0:
             return []
 
-        # Simple deduplication (case-insensitive) without re-normalization
-        deduped_candidates: List[str] = []
         seen: Set[str] = set()
+        deduped: List[str] = []
         for tag in tags:
-            tag_lower = tag.lower().strip()
-            if not tag_lower or tag_lower in seen:
-                continue
-            seen.add(tag_lower)
-            deduped_candidates.append(tag)  # Keep original format
+            key = tag.lower().strip()
+            if key and key not in seen:
+                seen.add(key)
+                deduped.append(tag)
 
-        logger.info(f"🔍 Selection pool: {len(deduped_candidates)} unique candidates for {num_tags} requested tags")
-
-        # If we have exactly or fewer than needed, return all
-        if len(deduped_candidates) <= num_tags:
-            logger.info(f"✅ Returning all {len(deduped_candidates)} candidates (no ranking needed)")
-            return deduped_candidates
-
-        # Score all candidates
-        anchor_set = set(anchor_terms or [])
-        context_tokens = set(self._tokenize_keywords(f"{title} {description}"))
-        base_scores = {
-            candidate: self._score_tag(candidate, anchor_set, context_tokens)
-            for candidate in deduped_candidates
-        }
-
-        # Greedy diversity-aware selection
-        selected: List[str] = []
-        remaining = deduped_candidates.copy()
-        
-        while remaining and len(selected) < num_tags:
-            best_tag = ""
-            best_adjusted_score = float("-inf")
-
-            for candidate in remaining:
-                # Calculate diversity penalty based on already selected tags
-                if selected:
-                    max_similarity = max(self._jaccard_similarity(candidate, chosen) for chosen in selected)
-                else:
-                    max_similarity = 0.0
-
-                # Diversity penalty prevents near-duplicate tags from dominating
-                adjusted_score = base_scores[candidate] - (1.1 * max_similarity)
-                if adjusted_score > best_adjusted_score:
-                    best_adjusted_score = adjusted_score
-                    best_tag = candidate
-
-            if not best_tag:
-                logger.warning(f"⚠️ Selection stopped early: no valid candidate found (selected {len(selected)}/{num_tags})")
-                break
-
-            selected.append(best_tag)
-            remaining.remove(best_tag)
-
-        logger.info(f"✅ Selected {len(selected)}/{num_tags} tags via specificity+diversity ranking")
-        return selected[:num_tags]
+        result = deduped[:num_tags]
+        logger.info(f"✅ Final {len(result)}/{num_tags} tags: {result}")
+        return result
     
     def _is_gibberish_tag(self, tag: str) -> bool:
         """
@@ -1111,7 +1080,7 @@ Output exactly {num_tags} tags, comma-separated, lowercase, hyphenated. No expla
         if len(tag) < 3:
             return False
 
-        for part in tag.split('-'):
+        for part in tag.replace('-', ' ').split():
             if not part:
                 continue
 
@@ -1141,165 +1110,122 @@ Output exactly {num_tags} tags, comma-separated, lowercase, hyphenated. No expla
         return False
     
     def _parse_tags(self, tags_text: str, expected_count: int) -> List[str]:
-        """Parse and clean tags from AI response (English only output)"""
-        logger.info(f"Parsing tags from: '{tags_text}'")
-        
-        # Generic/useless terms to automatically filter out (both spaced and hyphenated versions)
-        GENERIC_TERMS = {
-            # Contact/location terms
-            'contact details', 'contact-details', 'contact information', 'contact-information', 'contact info', 'contact-info',
-            'delhi address', 'delhi-address', 'address', 'office address', 'office-address', 'phone number', 'phone-number', 'email',
-            'office location', 'office-location', 'headquarters', 'contact',
-            # Language/format terms
-            'hindi document', 'hindi-document', 'hindi language', 'hindi-language', 'english document', 'english-document', 'language',
-            'publication', 'document', 'report', 'information', 'pdf', 'document type', 'document-type',
-            'publication date', 'publication-date', 'published',
-            # Generic organization terms
-            'government organization', 'government-organization', 'organization', 'ministry', 'department', 'foundation',
-            'government', 'india', 'organization details', 'organization-details',
-            'autonomous organization', 'autonomous-organization',  # From user examples
-            # Generic welfare/social terms (too broad without specificity)
-            'social welfare', 'social-welfare', 'empowerment', 'development',
-            'weaker sections', 'weaker-sections',  # From user examples
-            'social justice', 'social-justice',  # Too broad
-            'details', 'information', 'data',
-            'annual report', 'annual-report', 'newsletter',  # Too generic without year
-            # Tender/bid procedural terms (CRITICAL - from user examples)
-            'tender box', 'tender-box', 'tender notice', 'tender-notice', 'tender document', 'tender-document',
-            'tender opening', 'tender-opening', 'tender closing', 'tender-closing',
-            'tender details', 'tender-details', 'tender form', 'tender-form',
-            'tender amount', 'tender-amount', 'tender requirements', 'tender-requirements',
-            'tender invitation', 'tender-invitation', 'tender submission', 'tender-submission',
-            'bid opening', 'bid-opening', 'bid closing', 'bid-closing', 'bid submission', 'bid-submission',
-            'bid details', 'bid-details', 'bid document', 'bid-document', 'bid offer', 'bid-offer',
-            'bid splitting', 'bid-splitting', 'bid number', 'bid-number',
-            'investment tender', 'investment-tender',
-            'quotation', 'tender quotation', 'tender-quotation',
-            # Security/deposit terms
-            'security deposit', 'security-deposit', 'earnest money', 'earnest-money',
-            'security services', 'security-services', 'security agency', 'security-agency',
-            'security guards', 'security-guards',
-            # Amount terms (from user examples)
-            'crore', 'lakh', 'lakhs', 'rupees',
-            # Generic time terms
-            'submission date', 'submission-date', 'opening date', 'opening-date',
-            'closing date', 'closing-date', 'deadline',
-            # Annexure/form terms
-            'annexure a', 'annexure-a', 'annexure b', 'annexure-b', 'annexure c', 'annexure-c',
-            # Other generic terms from user examples  
-            'tenderers', 'tenderer requirements', 'tenderer-requirements',
-            'tender rates', 'tender-rates', 'tender bid', 'tender-bid',
-            'housekeeping tender', 'housekeeping-tender',
-            'tender for security', 'tender-for-security', 'tender for housekeeping', 'tender-for-housekeeping',
-            'psu bank', 'psu-bank', 'fixed deposit', 'fixed-deposit',
-        }
-        
-        # Remove any markdown formatting
-        tags_text = tags_text.replace('```', '').replace('*', '').replace('`', '').replace('"', '').strip()
-        
-        # Remove common prefixes that AI might add
-        prefixes_to_remove = ['tags:', 'here are', 'the tags are:', 'generated tags:', 'output:']
-        tags_text_lower = tags_text.lower()
-        for prefix in prefixes_to_remove:
-            if tags_text_lower.startswith(prefix):
-                tags_text = tags_text[len(prefix):].strip()
-                logger.info(f"Removed prefix '{prefix}', remaining: '{tags_text}'")
-        
-        # Split by comma, semicolon, or newline
-        if ',' in tags_text:
-            tags = [tag.strip() for tag in tags_text.split(',')]
-        elif ';' in tags_text:
-            tags = [tag.strip() for tag in tags_text.split(';')]
-        else:
-            tags = [tag.strip() for tag in tags_text.split('\n')]
-        
-        logger.info(f"Split into {len(tags)} tags: {tags}")
-        
-        # Clean and validate tags (English only)
-        valid_tags = []
-        rejected_generic = []
-        
-        for tag in tags:
-            if not tag:
-                continue
-                
-            # Clean the tag
-            original_tag = tag
-            tag = tag.lower().strip()
-            
-            # Remove leading numbers/bullets
-            tag = re.sub(r'^[\d\.\-\)\]\s]+', '', tag)
-            
-            # Keep only English alphanumeric, spaces, and hyphens
-            tag = re.sub(r'[^\w\s\-]', '', tag)
-            
-            # Normalize whitespace
-            tag = re.sub(r'\s+', ' ', tag).strip()
-            
-            # Only log if tag changed significantly during cleaning
-            if original_tag != tag:
-                logger.debug(f"Cleaned tag: '{original_tag}' -> '{tag}'")
-            
-            # Check word count - reject tags with 4+ words (too phrase-like)
-            words = tag.split()
-            if len(words) > 3:
-                logger.warning(f"🚫 Tag rejected (too long - {len(words)} words): '{tag}'")
-                logger.info(f"   💡 Suggestion: Split into separate tags")
-                rejected_generic.append(tag)
-                continue
-            
-            # Auto-hyphenate multi-word tags (2-3 words) if not already hyphenated
-            if len(words) >= 2 and '-' not in tag:
-                original_unhyphenated = tag
-                tag = '-'.join(words)
-                logger.debug(f"Auto-hyphenated: '{original_unhyphenated}' → '{tag}'")
-            
-            # Check if tag is gibberish
-            if self._is_gibberish_tag(tag):
-                rejected_generic.append(tag)
-                continue
-            
-            # Check if tag is too generic
-            if tag in GENERIC_TERMS:
-                logger.warning(f"Tag rejected (too generic): '{tag}'")
-                rejected_generic.append(tag)
-                continue
-            
-            # Check if tag contains only generic terms (single words)
-            tag_words = tag.replace('-', ' ').split()  # Split by hyphen or space for checking
-            if len(tag_words) == 1 and tag in self.GENERIC_SINGLE_TAGS:
-                logger.warning(f"🚫 Tag rejected (single generic word): '{tag}'")
-                rejected_generic.append(tag)
+        """
+        Parse tags from LLM response.
+
+        Primary path: expects a JSON object with keys "names", "subjects", "context".
+        Tiers are flattened in that order so the most identifying tags come first.
+
+        Fallback: if the model returned plain comma-separated text (older models,
+        no-system-message path, etc.) we split on commas and treat everything equally.
+
+        Filtering is intentionally minimal — the prompt handles quality.
+        We only reject: >3 word tags, roman numerals, gibberish OCR noise,
+        non-ASCII, and the tiny universal-noise set in _MINIMAL_GENERIC_TERMS.
+        """
+        logger.info(f"Raw AI response: '{tags_text[:300]}...'")
+
+        # ── 1. Attempt JSON parse ──────────────────────────────────────────────
+        raw_ordered: List[str] = []
+        parsed_as_json = False
+
+        cleaned = re.sub(r'```(?:json)?\s*', '', tags_text).replace('```', '').strip()
+        json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group(0))
+                for tier in ('names', 'subjects', 'actions', 'context'):
+                    for item in data.get(tier, []):
+                        if isinstance(item, str) and item.strip():
+                            raw_ordered.append(item.strip())
+                parsed_as_json = bool(raw_ordered)
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning(f"JSON parse failed ({e}), falling back to text split")
+
+        # ── 2. Text fallback ───────────────────────────────────────────────────
+        if not parsed_as_json:
+            if ',' in tags_text:
+                raw_ordered = [t.strip() for t in tags_text.split(',')]
+            elif ';' in tags_text:
+                raw_ordered = [t.strip() for t in tags_text.split(';')]
+            else:
+                raw_ordered = [t.strip() for t in tags_text.split('\n')]
+
+        logger.info(
+            f"Parsed {'JSON' if parsed_as_json else 'text'}: "
+            f"{len(raw_ordered)} raw candidates"
+        )
+
+        # ── 3. Clean and filter ────────────────────────────────────────────────
+        _MONTH_RE = re.compile(
+            r'^(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?'
+            r'|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?'
+            r'|dec(?:ember)?)$',
+            re.IGNORECASE
+        )
+
+        valid_tags: List[str] = []
+        rejected: List[str] = []
+
+        for raw in raw_ordered:
+            if not raw:
                 continue
 
-            # Reject tags made only of generic components without concrete qualifiers.
-            if self._is_overly_generic_without_qualifier(tag):
-                logger.warning(f"🚫 Tag rejected (generic compound without qualifier): '{tag}'")
-                rejected_generic.append(tag)
+            tag = raw.lower().strip()
+            tag = re.sub(r'^[\d\.\-\)\]\s]+', '', tag)    # strip leading bullets/numbers
+            tag = re.sub(r'^(st|nd|rd|th)\b\s*', '', tag) # strip orphaned ordinal suffixes
+            tag = re.sub(r'[^\w\s\-]', '', tag)            # remove special chars
+            tag = tag.replace('-', ' ')                     # de-hyphenate
+            tag = re.sub(r'\s+', ' ', tag).strip()
+
+            if not tag or len(tag) < 2 or len(tag) > 80:
                 continue
-            
-            # Validate: must be ASCII/English only
-            if tag and all(ord(c) < 128 for c in tag):
-                if len(tag) >= 2 and len(tag) <= 100 and tag not in valid_tags:
-                    valid_tags.append(tag)
-                    logger.debug(f"✓ '{tag}'")
-                else:
-                    if len(tag) < 2:
-                        logger.debug(f"✗ '{tag}' (too short)")
-                    elif len(tag) > 100:
-                        logger.debug(f"✗ '{tag}' (too long)")
-                    elif tag in valid_tags:
-                        logger.debug(f"✗ '{tag}' (duplicate)")
-            else:
-                logger.debug(f"✗ '{tag}' (non-ASCII)")
-        
-        if rejected_generic:
-            logger.info(f"🚫 Rejected {len(rejected_generic)} filtered tags: {rejected_generic[:5]}{'...' if len(rejected_generic) > 5 else ''}")
-        
-        logger.info(f"📊 Parsed result: {len(valid_tags)} valid tags from {len(tags)} candidates")
-        
-        # Return ALL valid tags (don't limit here - let caller decide)
-        # This ensures we have maximum tags available for the final selection
+
+            # Must be ASCII (English output only)
+            if not all(ord(c) < 128 for c in tag):
+                continue
+
+            # Reject pure date/number tags — dates don't help retrieve document content
+            words = tag.split()
+            all_date_words = all(
+                re.match(r'^\d+$', w) or _MONTH_RE.match(w)
+                for w in words
+            )
+            if all_date_words:
+                logger.debug(f"Rejected (date-only tag): '{tag}'")
+                rejected.append(tag)
+                continue
+
+            # 4-word maximum (allows "rights act 2019" style act names)
+            if len(words) > 4:
+                logger.debug(f"Rejected (too long): '{tag}'")
+                rejected.append(tag)
+                continue
+
+            # Pure roman numerals are document structure, not content
+            if self._ROMAN_RE.match(tag):
+                logger.debug(f"Rejected (roman numeral): '{tag}'")
+                rejected.append(tag)
+                continue
+
+            # OCR gibberish
+            if self._is_gibberish_tag(tag):
+                logger.debug(f"Rejected (gibberish): '{tag}'")
+                rejected.append(tag)
+                continue
+
+            # Universal noise (tiny set — see _MINIMAL_GENERIC_TERMS)
+            if tag in self._MINIMAL_GENERIC_TERMS:
+                logger.debug(f"Rejected (universal noise): '{tag}'")
+                rejected.append(tag)
+                continue
+
+            if tag not in valid_tags:
+                valid_tags.append(tag)
+
+        if rejected:
+            logger.info(f"Rejected {len(rejected)}: {rejected[:8]}")
+        logger.info(f"Valid tags after filtering: {len(valid_tags)}")
         return valid_tags
     
     def _filter_excluded_tags(self, tags: List[str]) -> List[str]:

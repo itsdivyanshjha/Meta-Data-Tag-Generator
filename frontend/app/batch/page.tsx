@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import dynamic from 'next/dynamic'
 import FileUploader from '@/components/batch/FileUploader'
@@ -30,6 +30,18 @@ export default function BatchProcessingPage() {
   
   const hasData = documents.length > 0
   const hasProcessedDocs = documents.some(d => d.status === 'success' || d.status === 'failed')
+
+  // Warn before navigating away during processing
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (isProcessing) {
+        e.preventDefault()
+        e.returnValue = ''
+      }
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [isProcessing])
   
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">

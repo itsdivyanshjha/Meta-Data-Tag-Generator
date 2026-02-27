@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routers import single, batch, status
 from app.routers import auth, history
 from app.database import get_database
+from app.services import redis_client
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,10 +26,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Database connection failed: {e}. Auth features will be unavailable.")
 
+    # Connect Redis
+    try:
+        r = await redis_client.get_redis()
+        await r.ping()
+        logger.info("Redis connection established")
+    except Exception as e:
+        logger.warning(f"Redis connection failed: {e}. Job persistence will be unavailable.")
+
     yield
 
     # Shutdown
     logger.info("Shutting down application...")
+    try:
+        await redis_client.close_redis()
+        logger.info("Redis connection closed")
+    except Exception as e:
+        logger.warning(f"Error closing Redis: {e}")
     try:
         await db.disconnect()
         logger.info("Database connection closed")
@@ -63,4 +77,3 @@ app.include_router(history.router, prefix="/api/history", tags=["History"])
 @app.get("/")
 def root():
     return {"message": "Document Meta-Tagging API", "version": "2.0.0"}
-

@@ -489,23 +489,23 @@ export const useBatchStore = create<BatchState>((set, get) => ({
   
   startProcessing: async () => {
     const { documents, columns, processingSettings, columnMapping: userColumnMapping } = get()
-    
+
     if (!processingSettings.apiKey) {
       throw new Error('API key is required')
     }
-    
+
     if (documents.length === 0) {
       throw new Error('No documents to process')
     }
-    
+
     // Validate that file_path is mapped
     if (!userColumnMapping['file_path']) {
       throw new Error('Please map the "PDF File Path/URL" column before processing')
     }
-    
+
     const jobId = uuidv4()
     set({ jobId, isProcessing: true, progress: 0 })
-    
+
     // Reset document statuses
     set((state) => ({
       documents: state.documents.map(doc => ({
@@ -515,22 +515,20 @@ export const useBatchStore = create<BatchState>((set, get) => ({
         error: undefined
       }))
     }))
-    
+
     // Prepare documents data using the column mapping
     const documentsData = documents.map(doc => {
       const rowData: Record<string, any> = {
         id: doc.id,
         row_number: doc.rowNumber
       }
-      
-      // Map user columns to system fields
+
       for (const [systemField, columnId] of Object.entries(userColumnMapping)) {
         if (columnId && doc.data[columnId] !== undefined) {
           rowData[systemField] = doc.data[columnId]
         }
       }
-      
-      // If no file_source_type is mapped, try to auto-detect from file_path
+
       if (!rowData['file_source_type'] && rowData['file_path']) {
         const path = rowData['file_path'].toLowerCase()
         if (path.startsWith('http://') || path.startsWith('https://')) {
@@ -541,31 +539,28 @@ export const useBatchStore = create<BatchState>((set, get) => ({
           rowData['file_source_type'] = 'local'
         }
       }
-      
+
       return rowData
     })
-    
-    // Determine WebSocket URL
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsHost = process.env.NEXT_PUBLIC_API_URL 
-      ? new URL(process.env.NEXT_PUBLIC_API_URL).host 
-      : 'localhost:8000'
-    
-    // Get authentication token if available
+
+    // Step 1: Start job via REST API (guaranteed delivery)
+    const apiUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
     const authStore = useAuthStore.getState()
     const token = authStore.getAccessToken()
-    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
-    const wsUrl = `${wsProtocol}//${wsHost}/api/batch/ws/${jobId}${tokenParam}`
-    
+
+    if (!token) {
+      set({ isProcessing: false })
+      throw new Error('Please log in to start processing')
+    }
+
     try {
-      const ws = new WebSocket(wsUrl)
-      set({ websocket: ws })
-      
-      ws.onopen = () => {
-        console.log('WebSocket connected, sending documents...')
-        
-        // Send the batch start request
-        ws.send(JSON.stringify({
+      const response = await fetch(`${apiUrl}/api/batch/start`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
           documents: documentsData,
           config: {
             api_key: processingSettings.apiKey,
@@ -573,76 +568,129 @@ export const useBatchStore = create<BatchState>((set, get) => ({
             num_pages: processingSettings.numPages,
             num_tags: processingSettings.numTags,
             exclusion_words: processingSettings.exclusionWords
-          }
-        }))
+          },
+          job_id: jobId
+        })
+      })
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}))
+        throw new Error(errData.detail || `Failed to start job: ${response.statusText}`)
       }
-      
-      ws.onmessage = (event) => {
-        const update = JSON.parse(event.data)
-        get().updateProgress(update)
-      }
-      
-      ws.onerror = (error) => {
-        console.error('WebSocket error:', error)
-        set({ isProcessing: false })
-      }
-      
-      ws.onclose = () => {
-        console.log('WebSocket closed')
-        set({ websocket: null, isProcessing: false })
-      }
-      
+
+      const startResult = await response.json()
+      const serverJobId = startResult.job_id
+      set({ jobId: serverJobId })
+
+      console.log(`Job started via REST: ${serverJobId}`)
+
+      // Step 2: Connect WebSocket to observe progress
+      _connectWebSocket(serverJobId)
+
     } catch (error) {
-      console.error('Failed to connect WebSocket:', error)
+      console.error('Failed to start batch job:', error)
       set({ isProcessing: false })
       throw error
     }
   },
-  
+
   stopProcessing: () => {
     const { websocket, jobId } = get()
-    
+
     console.log('Stopping processing...', { websocket: !!websocket, jobId })
-    
+
+    // Close WebSocket observer (does NOT cancel the job)
     if (websocket) {
-      // Close WebSocket with explicit close code to signal cancellation
       try {
-        websocket.close(1000, 'User requested cancellation')
+        websocket.close(1000, 'User closed observer')
       } catch (e) {
         console.error('Error closing WebSocket:', e)
       }
     }
-    
-    // Immediately update state to reflect stopping
-    set({ isProcessing: false, websocket: null })
-    
-    // Also try to cancel on backend via API if jobId exists
+
+    // Cancel the job on the backend via REST
     if (jobId) {
-      console.log('Job ID exists, attempting backend cancellation for', jobId)
-      // Note: The WebSocket close should be enough, but we log for debugging
+      const apiUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+      const token = useAuthStore.getState().getAccessToken()
+      fetch(`${apiUrl}/api/batch/jobs/${jobId}/cancel`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token || ''}`
+        }
+      }).catch(err => console.error('Failed to cancel job on backend:', err))
     }
+
+    set({ isProcessing: false, websocket: null })
   },
   
   updateProgress: (update) => {
-    // Handle different message types
+    // Handle catchup message (sent on WebSocket reconnect)
+    if (update.type === 'catchup') {
+      console.log('Received catchup state:', update.state?.status)
+      const results = update.results || []
+      if (results.length > 0) {
+        set((state) => {
+          const updatedDocs = [...state.documents]
+          for (const result of results) {
+            const rowNumber = result.row_number || (result.row_id + 1)
+            const docIdx = updatedDocs.findIndex(d => d.rowNumber === rowNumber)
+            if (docIdx >= 0) {
+              updatedDocs[docIdx] = {
+                ...updatedDocs[docIdx],
+                status: result.success ? 'success' : 'failed',
+                tags: result.tags,
+                error: result.error,
+                metadata: result.metadata
+              }
+            }
+          }
+          const total = state.documents.length
+          const processedSoFar = results.length
+          return {
+            documents: updatedDocs,
+            progress: total > 0 ? processedSoFar / total : 0
+          }
+        })
+      }
+      return
+    }
+
+    if (update.type === 'keepalive') {
+      return
+    }
+
     if (update.type === 'started') {
       console.log('Batch processing started:', update.message)
       return
     }
-    
+
     if (update.type === 'completed') {
       console.log('Batch processing completed:', update.message)
       set({ isProcessing: false, progress: 1 })
       return
     }
-    
+
+    if (update.type === 'cancelled') {
+      console.log('Batch processing cancelled:', update.message)
+      set({ isProcessing: false })
+      return
+    }
+
+    if (update.type === 'error') {
+      console.error('Batch job error:', update.error)
+      useNotificationStore.getState().addNotification({
+        type: 'unknown',
+        title: 'Processing Error',
+        message: update.error,
+        autoClose: 0
+      })
+      set({ isProcessing: false })
+      return
+    }
+
     if (update.error && !update.row_id && update.row_id !== 0) {
       console.error('Batch error:', update.error)
-      
-      // Use error_type if available, otherwise detect from error message
       const errorType = update.error_type || detectErrorType(update.error)
-      
-      // Emit appropriate notification based on error type
       switch (errorType) {
         case 'rate-limit':
           useNotificationStore.getState().addRateLimitError(
@@ -662,19 +710,18 @@ export const useBatchStore = create<BatchState>((set, get) => ({
         default:
           useNotificationStore.getState().addNotification({
             type: 'unknown',
-            title: '❌ Processing Error',
+            title: 'Processing Error',
             message: update.error,
-            autoClose: 0 // Manual close for critical errors
+            autoClose: 0
           })
       }
-      
       set({ isProcessing: false })
       return
     }
-    
-    // Handle progress update
+
+    // Handle per-document progress update
     const rowNumber = update.row_number || update.row_id + 1
-    
+
     set((state) => ({
       progress: update.progress || 0,
       documents: state.documents.map(doc => {
@@ -866,13 +913,13 @@ export const useBatchStore = create<BatchState>((set, get) => ({
   },
   
   // ===== RESET =====
-  
+
   reset: () => {
     const { websocket } = get()
     if (websocket) {
       websocket.close()
     }
-    
+
     set({
       columns: [],
       documents: [],
@@ -884,4 +931,115 @@ export const useBatchStore = create<BatchState>((set, get) => ({
     })
   }
 }))
+
+
+// ===== WebSocket Connection with Reconnection =====
+
+let _reconnectAttempts = 0
+const MAX_RECONNECT_ATTEMPTS = 10
+let _reconnectTimeout: NodeJS.Timeout | null = null
+let _pollingInterval: NodeJS.Timeout | null = null
+
+function _connectWebSocket(jobId: string) {
+  const store = useBatchStore.getState()
+  if (!store.isProcessing) return
+
+  const apiUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  let wsHost: string
+  try {
+    wsHost = new URL(apiUrl).host
+  } catch {
+    wsHost = 'localhost:8000'
+  }
+
+  const authStore = useAuthStore.getState()
+  const token = authStore.getAccessToken()
+  const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
+  const wsUrl = `${wsProtocol}//${wsHost}/api/batch/ws/${jobId}${tokenParam}`
+
+  try {
+    const ws = new WebSocket(wsUrl)
+    useBatchStore.setState({ websocket: ws })
+
+    ws.onopen = () => {
+      console.log(`WebSocket observer connected for job ${jobId}`)
+      _reconnectAttempts = 0
+      // Stop polling fallback if it was active
+      if (_pollingInterval) {
+        clearInterval(_pollingInterval)
+        _pollingInterval = null
+      }
+    }
+
+    ws.onmessage = (event) => {
+      const update = JSON.parse(event.data)
+      useBatchStore.getState().updateProgress(update)
+    }
+
+    ws.onerror = (error) => {
+      console.error('WebSocket observer error:', error)
+    }
+
+    ws.onclose = (event) => {
+      console.log('WebSocket observer closed:', event.code, event.reason)
+      useBatchStore.setState({ websocket: null })
+
+      // Only reconnect if job is still processing
+      const currentState = useBatchStore.getState()
+      if (currentState.isProcessing && _reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        _reconnectAttempts++
+        const delay = Math.min(1000 * Math.pow(2, _reconnectAttempts - 1), 30000)
+        console.log(`Reconnecting WebSocket in ${delay}ms (attempt ${_reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`)
+        _reconnectTimeout = setTimeout(() => _connectWebSocket(jobId), delay)
+      } else if (currentState.isProcessing && _reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        console.log('Max reconnect attempts reached. Falling back to REST polling.')
+        _startPollingFallback(jobId)
+      }
+    }
+  } catch (error) {
+    console.error('Failed to create WebSocket:', error)
+    const currentState = useBatchStore.getState()
+    if (currentState.isProcessing) {
+      _startPollingFallback(jobId)
+    }
+  }
+}
+
+function _startPollingFallback(jobId: string) {
+  if (_pollingInterval) return
+
+  const apiUrl = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+  const token = useAuthStore.getState().getAccessToken()
+
+  _pollingInterval = setInterval(async () => {
+    try {
+      const response = await fetch(`${apiUrl}/api/batch/jobs/${jobId}/status`, {
+        headers: { 'Authorization': `Bearer ${token || ''}` }
+      })
+      if (!response.ok) return
+
+      const data = await response.json()
+      useBatchStore.setState({ progress: data.progress })
+
+      if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
+        useBatchStore.setState({ isProcessing: false, progress: data.status === 'completed' ? 1 : data.progress })
+        if (_pollingInterval) {
+          clearInterval(_pollingInterval)
+          _pollingInterval = null
+        }
+      }
+    } catch (err) {
+      console.error('Polling error:', err)
+    }
+  }, 3000)
+}
+
+// Cleanup on page unload
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    if (_reconnectTimeout) clearTimeout(_reconnectTimeout)
+    if (_pollingInterval) clearInterval(_pollingInterval)
+  })
+}
 

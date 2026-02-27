@@ -2,16 +2,17 @@
 Batch Processing Router
 
 Provides endpoints for:
-- WebSocket-based real-time batch processing
+- REST-based job start (POST /start)
+- WebSocket-based progress observation (ws/{job_id})
+- Job control (cancel, pause, resume, status)
 - Path validation before processing
 - CSV template download
-- Legacy CSV upload processing
 """
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, Query, Depends
 from fastapi.responses import JSONResponse
 from app.models import (
-    BatchProcessResponse, 
+    BatchProcessResponse,
     TaggingConfig,
     PathValidationRequest,
     PathValidationResponse,
@@ -25,12 +26,12 @@ from app.services.async_batch_processor import batch_processor, AsyncBatchProces
 from app.services.exclusion_parser import ExclusionListParser
 from app.services.file_handler import FileHandler
 from app.services.auth_service import AuthService
+from app.services import redis_client
 from app.dependencies.auth import get_current_active_user
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 import time
 import json
-import base64
 import logging
 import requests
 import asyncio
@@ -40,218 +41,255 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ===== WEBSOCKET BATCH PROCESSING =====
+# ===== AUTHENTICATION HELPERS =====
 
 async def get_user_from_websocket(websocket: WebSocket) -> Optional[UUID]:
     """Extract and verify user from WebSocket query parameters or headers"""
     try:
-        # Try to get token from query parameters
         query_params = dict(websocket.query_params)
         token = query_params.get("token")
-        
         if not token:
-            # Try to get from headers (some WebSocket clients send auth in headers)
             headers = dict(websocket.headers)
             auth_header = headers.get("authorization") or headers.get("Authorization", "")
             if auth_header.startswith("Bearer "):
                 token = auth_header[7:]
-        
         if not token:
             return None
-        
-        # Verify token
         auth_service = AuthService()
         payload = auth_service.verify_access_token(token)
-        
         if payload is None:
             return None
-        
         return UUID(payload["sub"])
     except Exception as e:
         logger.debug(f"Failed to extract user from WebSocket: {e}")
         return None
 
+
+# ===== REST-BASED JOB START =====
+
+@router.post("/start", response_model=BatchStartResponse)
+async def start_batch_job(
+    request: BatchStartRequest,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """
+    Start a new batch processing job.
+
+    Processing runs in the background. Use the WebSocket endpoint
+    /ws/{job_id} to observe real-time progress, or poll
+    /jobs/{job_id}/status for current state.
+    """
+    documents = request.documents
+    config = request.config
+    column_mapping = request.column_mapping
+
+    if not documents:
+        raise HTTPException(status_code=400, detail="No documents provided")
+    if not config.api_key:
+        raise HTTPException(status_code=400, detail="API key is required")
+
+    user_id = UUID(current_user["id"]) if isinstance(current_user.get("id"), str) else current_user.get("id")
+
+    # Generate job_id server-side (or accept from client via request body if provided)
+    job_id = request.job_id if request.job_id else str(__import__('uuid').uuid4())
+
+    job = await batch_processor.start_job(
+        job_id=job_id,
+        documents=documents,
+        config=config,
+        column_mapping=column_mapping,
+        user_id=user_id
+    )
+
+    return BatchStartResponse(
+        job_id=job.job_id,
+        total_documents=len(documents),
+        message=f"Started processing of {len(documents)} documents"
+    )
+
+
+# ===== WEBSOCKET PROGRESS OBSERVER =====
+
 @router.websocket("/ws/{job_id}")
 async def batch_progress_websocket(websocket: WebSocket, job_id: str):
     """
-    WebSocket endpoint for real-time batch processing progress
-    
-    Flow:
-    1. Client connects with a job_id and optional token query parameter (?token=...)
-    2. Client sends BatchStartRequest JSON
-    3. Server processes documents and sends progress updates
-    4. Server sends final completion message
-    
-    Authentication:
-    - Pass token as query parameter: ws://host/api/batch/ws/{job_id}?token=...
-    - Or via Authorization header: Authorization: Bearer <token>
-    
-    Message format (client → server):
-    {
-        "documents": [...],
-        "config": {...},
-        "column_mapping": {...}
-    }
-    
-    Message format (server → client):
-    {
-        "job_id": "...",
-        "row_id": 0,
-        "row_number": 1,
-        "title": "...",
-        "status": "processing|success|failed",
-        "progress": 0.5,
-        "tags": [...],
-        "error": null,
-        "metadata": {...}
-    }
+    WebSocket endpoint for observing batch processing progress.
+
+    This is a READ-ONLY observer. Processing runs independently in the
+    background. Disconnecting the WebSocket does NOT cancel the job.
+
+    On connect, the server sends a "catchup" message with all results so far,
+    then streams live updates via Redis pub/sub.
+
+    Authentication: pass token as query parameter ?token=...
     """
     await websocket.accept()
-    logger.info(f"WebSocket connected for job {job_id}")
-    
-    # Extract user_id from authentication token - REQUIRED
+    logger.info(f"WebSocket observer connected for job {job_id}")
+
     user_id = await get_user_from_websocket(websocket)
     if not user_id:
-        logger.warning(f"Unauthenticated WebSocket connection attempt for job {job_id}")
-        await websocket.send_json({
-            "error": "Authentication required",
-            "job_id": job_id
-        })
-        await websocket.close(code=1008)  # Policy violation
+        await websocket.send_json({"error": "Authentication required", "job_id": job_id})
+        await websocket.close(code=1008)
         return
-    
-    logger.info(f"Authenticated user {user_id} for job {job_id}")
-    
+
     try:
-        # Wait for the batch start request
-        data = await websocket.receive_json()
-        
-        # Parse the request
-        documents = data.get("documents", [])
-        config_data = data.get("config", {})
-        column_mapping = data.get("column_mapping", {})
-        
-        if not documents:
-            await websocket.send_json({
-                "error": "No documents provided",
-                "job_id": job_id
-            })
-            await websocket.close()
-            return
-        
-        if not config_data.get("api_key"):
-            await websocket.send_json({
-                "error": "API key is required",
-                "job_id": job_id
-            })
-            await websocket.close()
-            return
-        
-        # Create config
-        config = TaggingConfig(**config_data)
-        
-        # Send acknowledgment
+        # Send catch-up state
+        job_state = await redis_client.get_job_state(job_id)
+        existing_results = await redis_client.get_results(job_id)
+
         await websocket.send_json({
-            "type": "started",
+            "type": "catchup",
             "job_id": job_id,
-            "total_documents": len(documents),
-            "message": f"Starting processing of {len(documents)} documents"
+            "state": job_state or {},
+            "results": existing_results,
         })
-        
-        # Create and process the batch job (with user_id for persistence)
-        processor = AsyncBatchProcessor()
-        job = await processor.start_job(documents, config, column_mapping, user_id=user_id)
-        
-        # Store the original job_id for logging/tracking
-        original_generated_job_id = job.job_id
-        # Override job_id to match the one from URL for consistency
-        job.job_id = job_id
-        
-        logger.info(f"Starting batch processing: generated_id={original_generated_job_id}, url_id={job_id}, db_id={job.db_job_id}")
-        
-        # Process the batch (this sends progress updates via websocket)
-        completed_job = await processor.process_batch(job, websocket)
-        
-        # Verify database update was successful
-        logger.info(f"Batch processing complete. Job status: {completed_job.status}, DB ID: {completed_job.db_job_id}")
-        
-        # Check if job was cancelled
-        if completed_job.cancelled:
-            logger.info(f"Job {job_id} was cancelled.")
-            # Try to send cancellation message if WebSocket still open
-            try:
-                await websocket.send_json({
-                    "type": "cancelled",
-                    "job_id": job_id,
-                    "processed_count": completed_job.processed_count,
-                    "failed_count": completed_job.failed_count,
-                    "message": f"Processing cancelled: {completed_job.processed_count} documents processed before cancellation"
-                })
-            except Exception as send_error:
-                logger.debug(f"Could not send cancellation message: {send_error}")
-        else:
-            # Send final completion message
-            try:
-                await websocket.send_json({
-                    "type": "completed",
-                    "job_id": job_id,
-                    "total_documents": len(documents),
-                    "processed_count": completed_job.processed_count,
-                    "failed_count": completed_job.failed_count,
-                    "processing_time": round(completed_job.end_time - completed_job.start_time, 2) if completed_job.end_time else 0,
-                    "message": f"Completed: {completed_job.processed_count} succeeded, {completed_job.failed_count} failed"
-                })
-            except Exception as send_error:
-                logger.debug(f"Could not send completion message for job {job_id}: {send_error}")
-        
-        # Cleanup
-        processor.cleanup_job(job_id)
-        
-    except WebSocketDisconnect:
-        logger.warning(f"WebSocket disconnected for job {job_id}. Cancelling processing.")
-        # Cancel the job immediately when WebSocket disconnects
-        if job_id in processor.active_jobs:
-            job = processor.active_jobs[job_id]
-            job.cancelled = True
-            # Try to update DB that job was cancelled
-            try:
-                if job.db_job_id:
-                    await processor._update_job_status_db(job, "cancelled")
-            except Exception as db_error:
-                logger.error(f"Failed to mark job {job_id} as cancelled in DB: {db_error}")
-            logger.info(f"Job {job_id} cancelled due to WebSocket disconnect")
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON in WebSocket message: {str(e)}")
-        try:
+
+        # If job is already done, send completion and close
+        if job_state and job_state.get("status") in ("completed", "failed", "cancelled"):
             await websocket.send_json({
-                "error": "Invalid JSON format",
-                "job_id": job_id
+                "type": job_state["status"],
+                "job_id": job_id,
+                "processed_count": job_state.get("processed_count", "0"),
+                "failed_count": job_state.get("failed_count", "0"),
+                "message": f"Job already {job_state['status']}",
             })
-        except:
-            pass
+            await websocket.close()
+            return
+
+        # Subscribe to live progress updates
+        pubsub = await redis_client.subscribe_progress(job_id)
+
+        try:
+            while True:
+                try:
+                    message = await asyncio.wait_for(
+                        _get_pubsub_message(pubsub),
+                        timeout=30.0
+                    )
+                    if message and message["type"] == "message":
+                        data = json.loads(message["data"])
+                        await websocket.send_json(data)
+
+                        msg_type = data.get("type", "")
+                        if msg_type in ("completed", "cancelled", "error"):
+                            break
+
+                except asyncio.TimeoutError:
+                    # Send keepalive and check if job finished
+                    state = await redis_client.get_job_field(job_id, "status")
+                    await websocket.send_json({"type": "keepalive", "job_id": job_id, "status": state})
+                    if state in ("completed", "failed", "cancelled"):
+                        await websocket.send_json({
+                            "type": state,
+                            "job_id": job_id,
+                            "message": f"Job {state}",
+                        })
+                        break
+
+        except WebSocketDisconnect:
+            logger.info(f"WebSocket observer disconnected for job {job_id}. Job continues running.")
+
+        finally:
+            await pubsub.unsubscribe()
+            await pubsub.close()
+
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket observer disconnected for job {job_id}. Job continues running.")
     except Exception as e:
         logger.error(f"WebSocket error for job {job_id}: {str(e)}", exc_info=True)
-        # Try to update DB that job failed
         try:
-            if job_id in processor.active_jobs:
-                job = processor.active_jobs[job_id]
-                if job.db_job_id:
-                    await processor._update_job_status_db(job, "failed", str(e))
-        except Exception as db_error:
-            logger.error(f"Failed to mark job {job_id} as failed in DB: {db_error}")
-        
-        try:
-            await websocket.send_json({
-                "error": str(e),
-                "job_id": job_id
-            })
-        except:
+            await websocket.send_json({"error": str(e), "job_id": job_id})
+        except Exception:
             pass
     finally:
         try:
             await websocket.close()
-        except:
+        except Exception:
             pass
+
+
+async def _get_pubsub_message(pubsub):
+    """Async wrapper to get a message from Redis pub/sub."""
+    while True:
+        message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+        if message:
+            return message
+        await asyncio.sleep(0.1)
+
+
+# ===== JOB CONTROL ENDPOINTS =====
+
+@router.get("/jobs/{job_id}/status")
+async def get_job_status(
+    job_id: str,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Get current status of a batch job from Redis."""
+    state = await redis_client.get_job_state(job_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Job not found")
+    results_count = await redis_client.get_results_count(job_id)
+    return {
+        "job_id": job_id,
+        "status": state.get("status", "unknown"),
+        "progress": float(state.get("progress", 0)),
+        "processed_count": int(state.get("processed_count", 0)),
+        "failed_count": int(state.get("failed_count", 0)),
+        "total": int(state.get("total", 0)),
+        "results_count": results_count,
+    }
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(
+    job_id: str,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Cancel a running batch job."""
+    await batch_processor.cancel_job(job_id)
+    return {"message": f"Cancel command sent to job {job_id}"}
+
+
+@router.post("/jobs/{job_id}/pause")
+async def pause_job(
+    job_id: str,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Pause a running batch job."""
+    await batch_processor.pause_job(job_id)
+    return {"message": f"Pause command sent to job {job_id}"}
+
+
+@router.post("/jobs/{job_id}/resume")
+async def resume_job(
+    job_id: str,
+    current_user: dict = Depends(get_current_active_user)
+):
+    """Resume a paused batch job."""
+    await batch_processor.resume_job(job_id)
+    return {"message": f"Resume command sent to job {job_id}"}
+
+
+@router.get("/active")
+async def get_active_jobs(
+    current_user: dict = Depends(get_current_active_user)
+):
+    """List all currently active/processing jobs."""
+    active_ids = await redis_client.get_active_job_ids()
+    jobs = []
+    user_id = str(current_user.get("id", ""))
+    for jid in active_ids:
+        state = await redis_client.get_job_state(jid)
+        if state and (not user_id or state.get("user_id", "") == user_id):
+            jobs.append({
+                "job_id": jid,
+                "status": state.get("status"),
+                "progress": float(state.get("progress", 0)),
+                "processed_count": int(state.get("processed_count", 0)),
+                "failed_count": int(state.get("failed_count", 0)),
+                "total": int(state.get("total", 0)),
+            })
+    return {"jobs": jobs}
 
 
 # ===== PATH VALIDATION =====
@@ -261,49 +299,28 @@ async def validate_paths(
     request: PathValidationRequest,
     current_user: dict = Depends(get_current_active_user)
 ):
-    """
-    Validate file paths before processing.
-    Requires authentication.
-    
-    Performs quick checks to verify paths are accessible:
-    - URL: HTTP HEAD request
-    - S3: Check object exists (if configured)
-    - Local: Check file exists
-    
-    Request body:
-    {
-        "paths": [
-            {"path": "https://example.com/doc.pdf", "type": "url"},
-            {"path": "s3://bucket/key.pdf", "type": "s3"},
-            {"path": "/path/to/file.pdf", "type": "local"}
-        ]
-    }
-    """
+    """Validate file paths before processing. Requires authentication."""
     logger.info(f"Starting path validation for {len(request.paths)} paths")
     start_time = time.time()
-    
+
     results: List[PathValidationResult] = []
     valid_count = 0
     invalid_count = 0
-    
+
     handler = FileHandler()
-    
+
     for item in request.paths:
         path = item.get("path", "").strip()
         path_type = item.get("type", "url").lower().strip()
-        
-        result = PathValidationResult(
-            path=path,
-            valid=False,
-            error=None
-        )
-        
+
+        result = PathValidationResult(path=path, valid=False, error=None)
+
         if not path:
             result.error = "Empty path"
             invalid_count += 1
             results.append(result)
             continue
-        
+
         try:
             if path_type == "url":
                 result = await _validate_url(path)
@@ -313,63 +330,46 @@ async def validate_paths(
                 result = _validate_local(path)
             else:
                 result.error = f"Unknown path type: {path_type}"
-            
+
             if result.valid:
                 valid_count += 1
             else:
                 invalid_count += 1
-                
         except Exception as e:
             result.error = str(e)
             invalid_count += 1
-        
         results.append(result)
-    
+
     elapsed_time = time.time() - start_time
-    logger.info(f"Path validation completed in {elapsed_time:.2f}s: {valid_count} valid, {invalid_count} invalid out of {len(results)} total")
-    
+    logger.info(f"Path validation completed in {elapsed_time:.2f}s: {valid_count} valid, {invalid_count} invalid")
+
     return PathValidationResponse(
-        results=results,
-        total=len(results),
-        valid_count=valid_count,
-        invalid_count=invalid_count
+        results=results, total=len(results),
+        valid_count=valid_count, invalid_count=invalid_count
     )
 
 
 async def _validate_url(url: str) -> PathValidationResult:
     """Validate URL with HEAD request"""
     result = PathValidationResult(path=url, valid=False)
-    
     if not url.startswith(('http://', 'https://')):
         result.error = "URL must start with http:// or https://"
         return result
-    
     try:
-        # Use HEAD request to check without downloading
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        # Run in thread pool to not block
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
-            None,
-            lambda: requests.head(url, timeout=10, headers=headers, allow_redirects=True)
+            None, lambda: requests.head(url, timeout=10, headers=headers, allow_redirects=True)
         )
-        
         if response.status_code == 200:
             result.valid = True
             result.content_type = response.headers.get('Content-Type', '')
-            
-            # Try to get file size
             content_length = response.headers.get('Content-Length')
             if content_length:
                 result.size = int(content_length)
         elif response.status_code == 405:
-            # HEAD not allowed, try GET with stream
             response = await loop.run_in_executor(
-                None,
-                lambda: requests.get(url, timeout=10, headers=headers, stream=True)
+                None, lambda: requests.get(url, timeout=10, headers=headers, stream=True)
             )
             if response.status_code == 200:
                 result.valid = True
@@ -379,85 +379,64 @@ async def _validate_url(url: str) -> PathValidationResult:
             response.close()
         else:
             result.error = f"HTTP {response.status_code}"
-            
     except requests.Timeout:
         result.error = "Request timed out"
     except requests.RequestException as e:
         result.error = f"Request failed: {str(e)}"
     except Exception as e:
         result.error = str(e)
-    
     return result
 
 
 def _validate_s3(path: str, handler: FileHandler) -> PathValidationResult:
     """Validate S3 path"""
     result = PathValidationResult(path=path, valid=False)
-    
-    # If it's actually a URL, validate as URL
     if path.startswith('http'):
-        # Can't validate async here, so just check format
         result.valid = True
-        result.error = None
         return result
-    
     if not handler.s3_client:
         result.error = "S3 client not configured"
         return result
-    
     try:
-        # Parse s3://bucket/key format
         if path.startswith('s3://'):
             parts = path[5:].split('/', 1)
-            bucket = parts[0]
-            key = parts[1] if len(parts) > 1 else ''
+            bucket, key = parts[0], parts[1] if len(parts) > 1 else ''
         else:
             parts = path.split('/', 1)
-            bucket = parts[0]
-            key = parts[1] if len(parts) > 1 else ''
-        
+            bucket, key = parts[0], parts[1] if len(parts) > 1 else ''
         if not key:
             result.error = "Invalid S3 path format"
             return result
-        
-        # Check if object exists
         response = handler.s3_client.head_object(Bucket=bucket, Key=key)
         result.valid = True
         result.size = response.get('ContentLength')
         result.content_type = response.get('ContentType', '')
-        
     except handler.s3_client.exceptions.NoSuchKey:
         result.error = "Object not found"
     except handler.s3_client.exceptions.NoSuchBucket:
         result.error = "Bucket not found"
     except Exception as e:
         result.error = f"S3 error: {str(e)}"
-    
     return result
 
 
 def _validate_local(path: str) -> PathValidationResult:
     """Validate local file path"""
     from pathlib import Path
-    
     result = PathValidationResult(path=path, valid=False)
-    
     try:
         file_path = Path(path)
-        
         if not file_path.exists():
-            result.error = f"File not found: {path}. Ensure the file exists on the backend server's filesystem. If running locally, use absolute paths. If running in Docker, ensure volumes are mounted correctly."
+            result.error = f"File not found: {path}"
         elif not file_path.is_file():
             result.error = "Not a file"
         elif not file_path.is_absolute():
-            result.error = "Relative paths not supported. Please use absolute paths from the backend server's perspective."
+            result.error = "Relative paths not supported"
         else:
             result.valid = True
             result.size = file_path.stat().st_size
-            
     except Exception as e:
         result.error = f"Path validation error: {str(e)}"
-    
     return result
 
 
@@ -470,58 +449,32 @@ async def process_batch_csv(
     exclusion_file: Optional[UploadFile] = File(None),
     current_user: dict = Depends(get_current_active_user)
 ):
-    """
-    Process batch CSV with multiple documents and optional exclusion list.
-    Requires authentication.
-    
-    This is the legacy endpoint that processes synchronously.
-    For real-time progress, use the WebSocket endpoint instead.
-    
-    Args:
-        csv_file: Uploaded CSV file
-        config: JSON string of TaggingConfig
-        exclusion_file: Optional file containing words/phrases to exclude from tags (.txt or .pdf)
-    """
+    """Legacy endpoint that processes synchronously."""
     start_time = time.time()
-    
     try:
-        # Parse config
         config_dict = json.loads(config)
         tagging_config = TaggingConfig(**config_dict)
-        
-        # Parse exclusion file if provided
+
         if exclusion_file and exclusion_file.filename:
-            logger.info(f"Processing exclusion file for batch: {exclusion_file.filename}")
             exclusion_bytes = await exclusion_file.read()
-            
             try:
                 parser = ExclusionListParser()
                 exclusion_words = parser.parse_from_file(exclusion_bytes, exclusion_file.filename)
                 tagging_config.exclusion_words = list(exclusion_words)
-                logger.info(f"Loaded {len(exclusion_words)} exclusion words for batch processing")
             except Exception as e:
-                logger.error(f"Failed to parse exclusion file: {str(e)}")
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Failed to parse exclusion file: {str(e)}"
-                )
-        
-        # Validate file type
+                raise HTTPException(status_code=400, detail=f"Failed to parse exclusion file: {str(e)}")
+
         if not csv_file.filename or not csv_file.filename.lower().endswith('.csv'):
-            raise HTTPException(status_code=400, detail="Invalid file type. Please upload a CSV file.")
-        
-        # Read CSV
+            raise HTTPException(status_code=400, detail="Invalid file type")
+
         csv_content = await csv_file.read()
-        
         if not csv_content:
             raise HTTPException(status_code=400, detail="Empty CSV file")
-        
-        # Process batch
+
         processor = CSVProcessor(tagging_config)
         result = processor.process_csv(csv_content)
-        
         processing_time = time.time() - start_time
-        
+
         return BatchProcessResponse(
             success=result["success"],
             total_documents=result["total_documents"],
@@ -531,7 +484,6 @@ async def process_batch_csv(
             summary_report=result["summary"],
             processing_time=round(processing_time, 2)
         )
-        
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid config JSON format")
     except HTTPException:
@@ -543,29 +495,20 @@ async def process_batch_csv(
 # ===== CSV TEMPLATE =====
 
 @router.get("/template")
-async def get_csv_template(
-    current_user: dict = Depends(get_current_active_user)
-):
-    """
-    Get a sample CSV template for batch processing.
-    Requires authentication.
-    """
+async def get_csv_template(current_user: dict = Depends(get_current_active_user)):
+    """Get a sample CSV template for batch processing."""
     template = """title,description,file_source_type,file_path,publishing_date,file_size
 "Training Manual","PMSPECIAL training document",url,https://example.com/doc1.pdf,2025-01-15,1.2MB
-"Annual Report 2024","Financial report",url,https://example.com/doc2.pdf,2024-12-31,2.5MB
-"Policy Guidelines","New policy document",url,https://example.com/policy.pdf,2025-02-01,850KB"""
-    
-    return JSONResponse(
-        content={
-            "template": template,
-            "columns": [
-                {"name": "title", "required": True, "description": "Document title"},
-                {"name": "description", "required": False, "description": "Document description"},
-                {"name": "file_source_type", "required": True, "description": "Source type: url, s3, or local"},
-                {"name": "file_path", "required": True, "description": "Path or URL to the file"},
-                {"name": "publishing_date", "required": False, "description": "Publication date"},
-                {"name": "file_size", "required": False, "description": "File size"}
-            ],
-            "note": "For real-time processing with progress updates, use the WebSocket endpoint at /api/batch/ws/{job_id}"
-        }
-    )
+"Annual Report 2024","Financial report",url,https://example.com/doc2.pdf,2024-12-31,2.5MB"""
+
+    return JSONResponse(content={
+        "template": template,
+        "columns": [
+            {"name": "title", "required": True, "description": "Document title"},
+            {"name": "description", "required": False, "description": "Document description"},
+            {"name": "file_source_type", "required": True, "description": "Source type: url, s3, or local"},
+            {"name": "file_path", "required": True, "description": "Path or URL to the file"},
+            {"name": "publishing_date", "required": False, "description": "Publication date"},
+            {"name": "file_size", "required": False, "description": "File size"}
+        ]
+    })

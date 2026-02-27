@@ -26,14 +26,6 @@ export default function RootLayout({
         <main className="flex-1 w-full px-8 py-8">
           {children}
         </main>
-
-        <footer className="border-t border-gray-200 bg-white mt-auto">
-          <div className="px-8 py-3">
-            <p className="text-center text-xs text-gray-400">
-              Multi-lingual Document Processing System
-            </p>
-          </div>
-        </footer>
       </body>
     </html>
   )
