@@ -1,6 +1,5 @@
-import PyPDF2
 from io import BytesIO
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import re
 import logging
 import multiprocessing
@@ -145,7 +144,7 @@ class PDFExtractor:
     Hybrid PDF text extractor with automatic OCR fallback for scanned documents
 
     Features:
-    - Primary: PyPDF2 for text-based PDFs (fastest)
+    - Primary: PyMuPDF for text-based PDFs (fastest, best font/layout handling)
     - Fallback 1: Tesseract OCR for scanned PDFs (fast, good for Hindi)
     - Fallback 2: EasyOCR for complex Indian languages (slower but more accurate)
     - Auto-detection: Determines if PDF is scanned based on text extraction results
@@ -426,7 +425,7 @@ class PDFExtractor:
         if not is_scanned:
             # Digital document - high quality
             quality_tier = 'high'
-            recommended_engine = 'pypdf2'
+            recommended_engine = 'pymupdf'
         elif ocr_confidence is not None:
             # Scanned document with confidence score
             if ocr_confidence >= 80:
@@ -471,7 +470,7 @@ class PDFExtractor:
 
         Legacy Indian PDFs (Krutidev, ISM, etc.) map Devanagari glyphs to
         positions in the Latin Extended Unicode range (U+00A0–U+024F).
-        PyPDF2 reads those raw code points as accented Latin characters,
+        Text extractors read those raw code points as accented Latin characters,
         producing strings like "ºÉÚSÉxÉÉ" instead of real text.
         langdetect then guesses "fr" or "de" from the accented characters,
         and the LLM hallucinates when given the garbage as input.
@@ -489,7 +488,7 @@ class PDFExtractor:
 
         # ── Garbled encoding detection ─────────────────────────────────────────
         # Latin Extended range U+00A0–U+024F is almost exclusively used by
-        # legacy Indian font encodings when misread by PyPDF2. A high ratio
+        # legacy Indian font encodings when misread by text extractors. A high ratio
         # means the "text" is actually font-mapping garbage, not real content.
         if text_length > 0:
             garbled_chars = sum(
@@ -533,7 +532,7 @@ class PDFExtractor:
     @staticmethod
     def _finalize_result(
         result: Dict[str, Any],
-        pypdf_title: Optional[str],
+        primary_title: Optional[str],
         detected_language: str,
         language_name: str,
         detection_method: str,
@@ -541,8 +540,8 @@ class PDFExtractor:
         ocr_confidence: Optional[float] = None
     ):
         """Set common metadata fields on an extraction result."""
-        if pypdf_title and pypdf_title != "Untitled Document":
-            result["title"] = pypdf_title
+        if primary_title and primary_title != "Untitled Document":
+            result["title"] = primary_title
         result["detected_language"] = detected_language
         result["language_name"] = language_name
         result["detection_method"] = detection_method
@@ -711,24 +710,35 @@ class PDFExtractor:
             dict with extracted_text, page_count, title, OCR metadata, detected_language, and quality_info
         """
         try:
-            # Step 1: Try PyPDF2 first (fast path)
-            pypdf_result = PDFExtractor._extract_with_pypdf(pdf_bytes, num_pages)
+            # Step 1: Try PyMuPDF first (fast path, best text extraction)
+            primary_result = PDFExtractor._extract_with_pymupdf_text(pdf_bytes, num_pages)
 
-            if not pypdf_result["success"]:
-                return pypdf_result
+            if not primary_result["success"]:
+                logger.warning(f"PyMuPDF extraction failed: {primary_result.get('error')}. No fallback text extractor available.")
+                return primary_result
 
             # Step 2: Analyze extracted content to decide if OCR is needed
-            text_length = len(pypdf_result["extracted_text"].strip())
-            pages_extracted = pypdf_result["pages_extracted"]
-            page_count = pypdf_result["page_count"]
+            text_length = len(primary_result["extracted_text"].strip())
+            pages_extracted = primary_result["pages_extracted"]
+            page_count = primary_result["page_count"]
             avg_chars_per_page = text_length / pages_extracted if pages_extracted > 0 else 0
 
+            # PyMuPDF can tell us directly if pages are image-only
+            image_only_pages = primary_result.get("image_only_pages", 0)
+            if image_only_pages > 0 and pages_extracted > 0:
+                image_ratio = image_only_pages / pages_extracted
+                if image_ratio > 0.5:
+                    logger.info(
+                        f"PyMuPDF detected {image_only_pages}/{pages_extracted} image-only pages "
+                        f"({image_ratio:.0%}) — OCR likely needed"
+                    )
+
             is_scanned, ocr_trigger_reason = PDFExtractor._should_attempt_ocr(
-                pypdf_result["extracted_text"], pages_extracted
+                primary_result["extracted_text"], pages_extracted
             )
 
             logger.info(
-                f"PyPDF2 extracted {text_length} chars from {pages_extracted} pages "
+                f"PyMuPDF extracted {text_length} chars from {pages_extracted} pages "
                 f"(avg: {avg_chars_per_page:.1f} chars/page). "
                 f"OCR needed: {is_scanned} ({ocr_trigger_reason})"
             )
@@ -739,7 +749,7 @@ class PDFExtractor:
 
             if text_length > 20:
                 # First attempt: Language detection
-                detected_language = PDFExtractor.detect_language(pypdf_result["extracted_text"])
+                detected_language = PDFExtractor.detect_language(primary_result["extracted_text"])
                 detection_method = "language_detection"
 
                 # If language not in our map, try script-based fallback
@@ -749,7 +759,7 @@ class PDFExtractor:
                         f"Using script-based fallback..."
                     )
                     detected_language = PDFExtractor.detect_language_by_script(
-                        pypdf_result["extracted_text"]
+                        primary_result["extracted_text"]
                     )
                     detection_method = "script_fallback"
             else:
@@ -765,33 +775,33 @@ class PDFExtractor:
             else:
                 logger.info(f"Using user-specified OCR languages: {ocr_languages}")
             
-            # Step 3: If content is sufficient, return PyPDF2 results directly
+            # Step 3: If content is sufficient, return PyMuPDF results directly
             if not is_scanned:
-                pypdf_result["is_scanned"] = False
-                pypdf_result["extraction_method"] = "pypdf2"
-                pypdf_result["ocr_confidence"] = None
+                primary_result["is_scanned"] = False
+                primary_result["extraction_method"] = "pymupdf"
+                primary_result["ocr_confidence"] = None
                 PDFExtractor._finalize_result(
-                    pypdf_result, None, detected_language,
+                    primary_result, None, detected_language,
                     ocr_config['name'], detection_method, page_count
                 )
-                return pypdf_result
+                return primary_result
             
             # Step 4: OCR fallback — content was insufficient
             logger.info(f"OCR needed ({ocr_trigger_reason}). Attempting OCR extraction...")
 
             if not OCR_AVAILABLE:
                 logger.warning("OCR libraries not available. Install pytesseract, pdf2image, Pillow")
-                pypdf_result["is_scanned"] = True
-                pypdf_result["extraction_method"] = "pypdf2_no_ocr"
-                pypdf_result["ocr_confidence"] = None
-                pypdf_result["error"] = "Document needs OCR but OCR libraries not installed"
+                primary_result["is_scanned"] = True
+                primary_result["extraction_method"] = "pymupdf_no_ocr"
+                primary_result["ocr_confidence"] = None
+                primary_result["error"] = "Document needs OCR but OCR libraries not installed"
                 PDFExtractor._finalize_result(
-                    pypdf_result, None, detected_language,
+                    primary_result, None, detected_language,
                     ocr_config['name'], detection_method, page_count
                 )
-                return pypdf_result
+                return primary_result
 
-            pypdf_title = pypdf_result.get("title", "Untitled Document")
+            primary_title = primary_result.get("title", "Untitled Document")
             best_ocr_result = None
             best_ocr_text_len = 0
             tesseract_accepted = False
@@ -891,34 +901,34 @@ class PDFExtractor:
             if best_ocr_result and best_ocr_text_len >= text_length:
                 best_ocr_result["is_scanned"] = True
                 PDFExtractor._finalize_result(
-                    best_ocr_result, pypdf_title, detected_language,
+                    best_ocr_result, primary_title, detected_language,
                     ocr_config['name'], detection_method, page_count,
                     best_ocr_result.get("ocr_confidence")
                 )
                 logger.info(
                     f"✅ Using OCR ({best_ocr_text_len} chars, "
                     f"method: {best_ocr_result.get('extraction_method', '?')}) "
-                    f"over PyPDF2 ({text_length} chars)"
+                    f"over PyMuPDF ({text_length} chars)"
                 )
                 return best_ocr_result
 
-            # OCR didn't improve on PyPDF2 — fall back to digital extraction
+            # OCR didn't improve on PyMuPDF — fall back to digital extraction
             if best_ocr_result:
                 logger.warning(
                     f"⚠️ OCR ({best_ocr_text_len} chars) didn't surpass "
-                    f"PyPDF2 ({text_length} chars), preferring PyPDF2"
+                    f"PyMuPDF ({text_length} chars), preferring PyMuPDF"
                 )
             else:
-                logger.warning("All OCR methods failed, falling back to PyPDF2")
+                logger.warning("All OCR methods failed, falling back to PyMuPDF")
 
-            pypdf_result["is_scanned"] = True
-            pypdf_result["extraction_method"] = "pypdf2_ocr_insufficient"
-            pypdf_result["ocr_confidence"] = None
+            primary_result["is_scanned"] = True
+            primary_result["extraction_method"] = "pymupdf_ocr_insufficient"
+            primary_result["ocr_confidence"] = None
             PDFExtractor._finalize_result(
-                pypdf_result, None, detected_language,
+                primary_result, None, detected_language,
                 ocr_config['name'], detection_method, page_count
             )
-            return pypdf_result
+            return primary_result
             
         except Exception as e:
             logger.error(f"Error in extract_text: {str(e)}", exc_info=True)
@@ -935,58 +945,84 @@ class PDFExtractor:
             }
     
     @staticmethod
-    def _extract_with_pypdf(pdf_bytes: bytes, num_pages: int) -> Dict[str, Any]:
-        """Extract text using PyPDF2 (fast, for text-based PDFs)"""
+    def _extract_with_pymupdf_text(pdf_bytes: bytes, num_pages: int) -> Dict[str, Any]:
+        """
+        Primary text extractor using PyMuPDF (fitz).
+
+        Advantages over PyPDF2:
+        - Superior font handling (CID, embedded, ligatures, Unicode)
+        - Preserves reading order and layout structure
+        - Handles encrypted/damaged PDFs more gracefully
+        - Extracts richer metadata (TOC, bookmarks)
+        - 3-5x faster in benchmarks
+        - Can detect image-only pages natively
+        """
+        if not PYMUPDF_AVAILABLE:
+            return {
+                "success": False,
+                "error": "PyMuPDF not installed",
+                "extracted_text": "",
+                "page_count": 0,
+                "pages_extracted": 0,
+                "title": "Untitled Document"
+            }
+
         try:
-            pdf_file = BytesIO(pdf_bytes)
-            pdf_reader = PyPDF2.PdfReader(pdf_file)
-            
-            page_count = len(pdf_reader.pages)
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            page_count = len(doc)
             pages_to_extract = min(num_pages, page_count)
-            
-            # Extract text from specified pages with proper encoding
+
             extracted_text = ""
+            image_only_pages = 0
+
             for i in range(pages_to_extract):
-                page = pdf_reader.pages[i]
-                page_text = page.extract_text()
-                if page_text:
-                    # Ensure proper UTF-8 encoding
-                    try:
-                        # Try to encode/decode to fix encoding issues
-                        page_text = page_text.encode('utf-8', errors='ignore').decode('utf-8')
-                    except:
-                        # If fails, use as is
-                        pass
+                page = doc[i]
+
+                # Extract text preserving layout and reading order
+                page_text = page.get_text("text")
+
+                if page_text and page_text.strip():
                     extracted_text += page_text + "\n"
-            
-            # Check if text looks corrupted (has lots of non-standard ASCII but not proper Unicode)
-            # This indicates encoding issues
+                else:
+                    # Page has no extractable text — likely scanned/image-only
+                    image_only_pages += 1
+
+            # Check if text looks corrupted (legacy Indian font encodings)
             is_likely_corrupted = PDFExtractor._is_text_corrupted(extracted_text)
-            
+
             if is_likely_corrupted:
-                logger.warning("Detected corrupted/wrong encoding in PyPDF2 extraction")
-                # Force OCR for better results
+                logger.warning("Detected corrupted/wrong encoding in PyMuPDF extraction")
+                doc.close()
                 return {
                     "success": True,
                     "extracted_text": "",  # Empty to trigger OCR
                     "page_count": page_count,
                     "pages_extracted": 0,  # Zero to trigger OCR fallback
-                    "title": "Untitled Document"
+                    "title": "Untitled Document",
+                    "image_only_pages": pages_to_extract
                 }
-            
-            # Try to get title from metadata or extract from content
-            title = PDFExtractor._extract_title(pdf_reader, extracted_text)
-            
+
+            # Extract metadata — PyMuPDF provides richer metadata than PyPDF2
+            title = PDFExtractor._extract_title_from_pymupdf(doc, extracted_text)
+
+            # Extract table of contents if available (useful for structure understanding)
+            toc = doc.get_toc(simple=True)  # [[level, title, page_num], ...]
+            toc_entries = [entry[1] for entry in toc[:20]] if toc else []
+
+            doc.close()
+
             return {
                 "success": True,
                 "extracted_text": extracted_text,
                 "page_count": page_count,
                 "pages_extracted": pages_to_extract,
-                "title": title
+                "title": title,
+                "image_only_pages": image_only_pages,
+                "toc_entries": toc_entries
             }
-            
+
         except Exception as e:
-            logger.error(f"PyPDF2 extraction failed: {str(e)}", exc_info=True)
+            logger.error(f"PyMuPDF text extraction failed: {str(e)}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e),
@@ -995,6 +1031,31 @@ class PDFExtractor:
                 "pages_extracted": 0,
                 "title": "Untitled Document"
             }
+
+    @staticmethod
+    def _extract_title_from_pymupdf(doc, extracted_text: str) -> str:
+        """
+        Extract document title using PyMuPDF's rich metadata.
+        Falls back to text-based extraction if metadata is empty.
+        """
+        # Try PDF metadata first
+        metadata = doc.metadata
+        if metadata:
+            meta_title = metadata.get("title", "")
+            if meta_title and meta_title.strip():
+                title = meta_title.strip()
+                if title.lower() not in ('untitled', 'document', 'untitled document', 'microsoft word'):
+                    return title
+
+        # Try first TOC entry as title
+        toc = doc.get_toc(simple=True)
+        if toc and toc[0][1].strip():
+            first_entry = toc[0][1].strip()
+            if 10 <= len(first_entry) <= 100:
+                return first_entry
+
+        # Fall back to text-based extraction
+        return PDFExtractor._extract_title_from_text(extracted_text)
     
     @staticmethod
     def _extract_with_ocr(
@@ -1248,17 +1309,22 @@ class PDFExtractor:
             return fail_result
     
     @staticmethod
-    def _extract_title(pdf_reader, extracted_text: str) -> str:
-        """Extract title from metadata or content"""
-        # Try metadata first
-        if pdf_reader.metadata:
-            metadata_title = pdf_reader.metadata.get('/Title')
-            if metadata_title and str(metadata_title).strip():
-                title = str(metadata_title).strip()
-                if title and title.lower() not in ['untitled', 'document', 'untitled document']:
+    def _extract_title(doc_or_metadata, extracted_text: str) -> str:
+        """Extract title from metadata or content. Works with PyMuPDF doc or metadata dict."""
+        metadata = None
+        if hasattr(doc_or_metadata, 'metadata'):
+            metadata = doc_or_metadata.metadata
+        elif isinstance(doc_or_metadata, dict):
+            metadata = doc_or_metadata
+
+        if metadata:
+            # PyMuPDF uses lowercase keys; handle both styles
+            meta_title = metadata.get('title') or metadata.get('/Title')
+            if meta_title and str(meta_title).strip():
+                title = str(meta_title).strip()
+                if title.lower() not in ('untitled', 'document', 'untitled document', 'microsoft word'):
                     return title
-        
-        # Try to extract from content
+
         return PDFExtractor._extract_title_from_text(extracted_text)
     
     @staticmethod
@@ -1400,29 +1466,42 @@ class PDFExtractor:
     @staticmethod
     def get_pdf_info(pdf_bytes: bytes) -> Dict[str, Any]:
         """
-        Get PDF metadata without extracting full text
-        
+        Get PDF metadata without extracting full text using PyMuPDF.
+
+        Returns richer metadata than PyPDF2 including TOC/bookmarks.
+
         Args:
             pdf_bytes: PDF file as bytes
-            
+
         Returns:
             dict with PDF metadata
         """
+        if not PYMUPDF_AVAILABLE:
+            return {"success": False, "error": "PyMuPDF not installed"}
+
         try:
-            pdf_file = BytesIO(pdf_bytes)
-            pdf_reader = PyPDF2.PdfReader(pdf_file)
-            
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
             metadata = {}
-            if pdf_reader.metadata:
-                for key, value in pdf_reader.metadata.items():
-                    metadata[key] = str(value)
-            
+            if doc.metadata:
+                for key, value in doc.metadata.items():
+                    if value:
+                        metadata[key] = str(value)
+
+            # Extract TOC if available
+            toc = doc.get_toc(simple=True)
+            toc_entries = [{"level": e[0], "title": e[1], "page": e[2]} for e in toc[:30]] if toc else []
+
+            page_count = len(doc)
+            doc.close()
+
             return {
                 "success": True,
-                "page_count": len(pdf_reader.pages),
-                "metadata": metadata
+                "page_count": page_count,
+                "metadata": metadata,
+                "toc": toc_entries
             }
-            
+
         except Exception as e:
             return {
                 "success": False,

@@ -17,7 +17,6 @@ websockets==12.0
 aiofiles==23.2.1
 
 # PDF Processing
-PyPDF2==3.0.1
 pdf2image==1.16.3
 Pillow==10.1.0
 pytesseract==0.3.10

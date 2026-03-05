@@ -508,7 +508,7 @@ export default function SingleUpload({ config, exclusionFile }: SingleUploadProp
             {/* Extraction Method Info */}
             {result.extraction_method && (
               <p className="text-sm text-gray-500 mt-2">
-                Extracted using {result.extraction_method === 'pypdf2' ? 'PyPDF2' : result.extraction_method === 'tesseract_ocr' ? 'Tesseract OCR' : result.extraction_method}
+                Extracted using {result.extraction_method === 'pymupdf' ? 'PyMuPDF' : result.extraction_method === 'tesseract_ocr' ? 'Tesseract OCR' : result.extraction_method}
               </p>
             )}
           </div>
