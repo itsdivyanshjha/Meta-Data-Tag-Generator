@@ -1,5 +1,5 @@
 # Backend Dockerfile for Meta-Data-Tag-Generator
-FROM python:3.8-slim
+FROM python:3.14.3-slim
 
 # Set working directory
 WORKDIR /app
