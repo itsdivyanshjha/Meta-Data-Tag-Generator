@@ -4,6 +4,7 @@ from app.models import SinglePDFResponse, TaggingConfig
 from app.services.pdf_extractor import PDFExtractor
 from app.services.ai_tagger import AITagger
 from app.services.exclusion_parser import ExclusionListParser
+from app.services.entity_extractor import EntityExtractor
 from app.repositories import JobRepository, DocumentRepository
 from app.dependencies.auth import get_current_active_user
 from typing import Optional
@@ -157,10 +158,26 @@ async def process_single_pdf(
         # Check if we have enough text
         if len(extraction_result["extracted_text"].strip()) < 50:
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail="Could not extract sufficient text from PDF. The document might be scanned or image-based without OCR support."
             )
-        
+
+        # Entity extraction (best-effort pre-processing, never blocks pipeline)
+        extracted_entities = None
+        try:
+            entity_extractor = EntityExtractor(
+                api_key=tagging_config.api_key,
+                model_name=tagging_config.model_name
+            )
+            entity_result = entity_extractor.extract_entities(
+                extraction_result["extracted_text"]
+            )
+            if entity_result["success"] and entity_result["entities"]:
+                extracted_entities = entity_result["entity_summary"]
+                logger.info(f"Entity extraction: {len(entity_result['entities'])} entities found")
+        except Exception as entity_err:
+            logger.warning(f"Entity extraction skipped: {entity_err}")
+
         # Generate tags with exclusion list and language awareness
         tagger = AITagger(
             tagging_config.api_key,
@@ -174,7 +191,8 @@ async def process_single_pdf(
             num_tags=tagging_config.num_tags,
             detected_language=extraction_result.get("detected_language"),
             language_name=extraction_result.get("language_name"),
-            quality_info=extraction_result.get("quality_info")
+            quality_info=extraction_result.get("quality_info"),
+            extracted_entities=extracted_entities
         )
         
         logger.info(f"Tagging result success: {tagging_result['success']}")

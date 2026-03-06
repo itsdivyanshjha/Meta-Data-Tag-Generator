@@ -22,6 +22,7 @@ from app.models import (
 from app.services.pdf_extractor import PDFExtractor
 from app.services.ai_tagger import AITagger
 from app.services.file_handler import FileHandler
+from app.services.entity_extractor import EntityExtractor
 from app.services import redis_client
 from app.repositories import JobRepository, DocumentRepository
 
@@ -478,6 +479,20 @@ class AsyncBatchProcessor:
                 "text_length": len(extracted_text)
             }
 
+            # Entity extraction (best-effort, never blocks pipeline)
+            extracted_entities = None
+            try:
+                entity_extractor = EntityExtractor(
+                    api_key=config.api_key,
+                    model_name=config.model_name
+                )
+                entity_result = entity_extractor.extract_entities(extracted_text)
+                if entity_result["success"] and entity_result["entities"]:
+                    extracted_entities = entity_result["entity_summary"]
+                    logger.info(f"Entity extraction: {len(entity_result['entities'])} entities found")
+            except Exception as entity_err:
+                logger.warning(f"Entity extraction skipped: {entity_err}")
+
             tagging_result = tagger.generate_tags(
                 title=doc_info.get("title", ""),
                 description=doc_info.get("description", ""),
@@ -485,7 +500,8 @@ class AsyncBatchProcessor:
                 num_tags=config.num_tags,
                 detected_language=extraction_result.get("detected_language"),
                 language_name=extraction_result.get("language_name"),
-                quality_info=extraction_result.get("quality_info")
+                quality_info=extraction_result.get("quality_info"),
+                extracted_entities=extracted_entities
             )
 
             if not tagging_result["success"]:

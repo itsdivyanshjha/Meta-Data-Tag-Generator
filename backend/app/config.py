@@ -33,6 +33,9 @@ class Settings(BaseSettings):
 
     # Text Processing
     max_words_for_ai: int = 2000
+
+    # Entity Extraction (LLM pre-processing before tagging)
+    entity_extraction_max_chars: int = 15000  # Max chars sent to entity extractor per document
     
     # Batch Processing Rate Limiting (for free tier)
     batch_retry_max_attempts: int = 3  # Max retries per document before skipping

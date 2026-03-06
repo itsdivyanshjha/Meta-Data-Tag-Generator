@@ -1,5 +1,5 @@
 # Backend Dockerfile for Meta-Data-Tag-Generator
-FROM python:3.8-slim
+FROM python:3.10-slim
 
 # Set working directory
 WORKDIR /app
@@ -7,8 +7,22 @@ WORKDIR /app
 # Install system dependencies for Tesseract OCR, PDF processing, and PyTorch
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
-    tesseract-ocr-hin \
+    tesseract-ocr-osd \
     tesseract-ocr-eng \
+    tesseract-ocr-hin \
+    tesseract-ocr-asm \
+    tesseract-ocr-kan \
+    tesseract-ocr-tam \
+    tesseract-ocr-tel \
+    tesseract-ocr-ben \
+    tesseract-ocr-guj \
+    tesseract-ocr-mal \
+    tesseract-ocr-mar \
+    tesseract-ocr-pan \
+    tesseract-ocr-ori \
+    tesseract-ocr-urd \
+    tesseract-ocr-san \
+    tesseract-ocr-nep \
     libtesseract-dev \
     poppler-utils \
     libgomp1 \
@@ -16,7 +30,7 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxext6 \
     libxrender-dev \
-    libgl1-mesa-glx \
+    libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements file

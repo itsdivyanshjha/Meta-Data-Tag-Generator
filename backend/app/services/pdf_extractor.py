@@ -398,6 +398,75 @@ class PDFExtractor:
 
         return fallback_lang
 
+    # Tesseract OSD script names → our OCR language codes
+    OSD_SCRIPT_TO_LANGUAGE = {
+        'Devanagari': 'hi',
+        'Kannada': 'kn',
+        'Tamil': 'ta',
+        'Telugu': 'te',
+        'Bengali': 'bn',
+        'Gujarati': 'gu',
+        'Malayalam': 'ml',
+        'Gurmukhi': 'pa',
+        'Oriya': 'or',    # Tesseract OSD uses "Oriya" not "Odia"
+        'Arabic': 'ur',
+        'Latin': 'en',
+    }
+
+    @staticmethod
+    def detect_script_from_image(pdf_bytes: bytes) -> str:
+        """
+        Detect the script of an image-only PDF by rendering the first page
+        and running Tesseract's OSD (Orientation and Script Detection).
+
+        This is used when PyMuPDF extracts 0 text (image-only scanned docs)
+        and langdetect has nothing to work with.
+
+        Returns:
+            Language code (e.g. 'kn', 'hi', 'ta') or DEFAULT_LANGUAGE on failure
+        """
+        if not OCR_AVAILABLE or not PYMUPDF_AVAILABLE:
+            logger.warning("Cannot detect script from image: OCR or PyMuPDF not available")
+            return PDFExtractor.DEFAULT_LANGUAGE
+
+        try:
+            # Render just the first page at low DPI for speed
+            images = PDFExtractor._render_pdf_pages_pymupdf(pdf_bytes, num_pages=1, dpi=150)
+            if not images:
+                logger.warning("Could not render page for script detection")
+                return PDFExtractor.DEFAULT_LANGUAGE
+
+            # Run Tesseract OSD — detects script without needing the right language pack
+            osd_output = pytesseract.image_to_osd(images[0])
+            logger.info(f"Tesseract OSD output: {osd_output}")
+
+            # Parse "Script: Kannada" from OSD output
+            script_match = re.search(r'Script:\s*(\w+)', osd_output)
+            if not script_match:
+                logger.warning("Could not parse script from OSD output")
+                return PDFExtractor.DEFAULT_LANGUAGE
+
+            detected_script = script_match.group(1)
+            confidence_match = re.search(r'Script confidence:\s*([\d.]+)', osd_output)
+            script_confidence = float(confidence_match.group(1)) if confidence_match else 0
+
+            # Map OSD script name to our language code
+            detected_lang = PDFExtractor.OSD_SCRIPT_TO_LANGUAGE.get(
+                detected_script, PDFExtractor.DEFAULT_LANGUAGE
+            )
+
+            lang_info = PDFExtractor.OCR_LANGUAGE_MAP.get(detected_lang, {})
+            logger.info(
+                f"Image script detection: {detected_script} (confidence: {script_confidence}) "
+                f"→ {lang_info.get('name', detected_lang)} OCR"
+            )
+
+            return detected_lang
+
+        except Exception as e:
+            logger.warning(f"Image-based script detection failed: {e}")
+            return PDFExtractor.DEFAULT_LANGUAGE
+
     @staticmethod
     def assess_document_quality(
         text: str,
@@ -763,7 +832,13 @@ class PDFExtractor:
                     )
                     detection_method = "script_fallback"
             else:
-                logger.info(f"Text too short for language detection, using default: Hindi")
+                # No text to detect language from — use image-based script detection
+                logger.info(
+                    "Text too short for language detection. "
+                    "Attempting image-based script detection..."
+                )
+                detected_language = PDFExtractor.detect_script_from_image(pdf_bytes)
+                detection_method = "image_script_detection"
 
             # Get OCR configuration for detected language
             ocr_config = PDFExtractor.get_ocr_config(detected_language)
@@ -814,26 +889,50 @@ class PDFExtractor:
 
             t_conf = 0
             t_len = 0
+            tesseract_quality_ok = True
+            is_non_latin = ocr_config.get('script', 'Latin') != 'Latin'
+
             if tesseract_result["success"]:
                 t_conf = tesseract_result.get("ocr_confidence", 0)
                 t_len = len(tesseract_result.get("extracted_text", "").strip())
                 logger.info(f"Tesseract: {t_len} chars, {t_conf}% confidence")
 
-                if t_conf >= PDFExtractor.TESSERACT_CONFIDENCE_THRESHOLD and t_len > 100:
+                # Content quality check — high confidence doesn't mean good text
+                if t_len > 100:
+                    tesseract_quality_ok = not PDFExtractor._is_gibberish(
+                        tesseract_result["extracted_text"]
+                    )
+                    if not tesseract_quality_ok:
+                        logger.warning(
+                            f"⚠️ Tesseract confidence is {t_conf}% but text "
+                            f"quality is poor (gibberish detected). Will try EasyOCR."
+                        )
+
+                # Accept Tesseract ONLY if both confidence AND quality pass
+                if (t_conf >= PDFExtractor.TESSERACT_CONFIDENCE_THRESHOLD
+                        and t_len > 100 and tesseract_quality_ok):
                     best_ocr_result = tesseract_result
                     best_ocr_text_len = t_len
                     tesseract_accepted = True
-                    logger.info(f"✅ Tesseract accepted (good confidence: {t_conf}%)")
+                    logger.info(f"✅ Tesseract accepted (good confidence: {t_conf}%, quality OK)")
                 else:
                     logger.info(
                         f"🔄 Tesseract insufficient (confidence: {t_conf}%, "
-                        f"text: {t_len} chars). Trying EasyOCR..."
+                        f"text: {t_len} chars, quality_ok: {tesseract_quality_ok}). "
+                        f"Trying EasyOCR..."
                     )
             else:
                 logger.warning("🔄 Tesseract failed. Trying EasyOCR...")
 
-            # 4b: EasyOCR — only if Tesseract wasn't good enough
-            if not tesseract_accepted and EASYOCR_AVAILABLE:
+            # 4b: EasyOCR — run if Tesseract wasn't good enough, OR if
+            # language is non-Latin and Tesseract quality is poor (even if
+            # confidence was high). EasyOCR's neural models often handle
+            # Devanagari, Bengali, Tamil etc. better than Tesseract.
+            run_easyocr = (
+                not tesseract_accepted
+                or (is_non_latin and not tesseract_quality_ok)
+            )
+            if run_easyocr and EASYOCR_AVAILABLE:
                 easyocr_result = PDFExtractor._extract_with_easyocr(
                     pdf_bytes, num_pages, ocr_config['easyocr'],
                     detected_language, dpi=ocr_dpi
@@ -847,8 +946,28 @@ class PDFExtractor:
                     if not tesseract_result["success"]:
                         best_ocr_result = easyocr_result
                         best_ocr_text_len = e_len
+                    elif not tesseract_quality_ok:
+                        # Tesseract produced gibberish — strongly prefer EasyOCR
+                        # as long as it has any reasonable output
+                        easyocr_quality_ok = not PDFExtractor._is_gibberish(
+                            easyocr_result["extracted_text"]
+                        )
+                        if easyocr_quality_ok or e_len > t_len:
+                            best_ocr_result = easyocr_result
+                            best_ocr_text_len = e_len
+                            logger.info(
+                                f"EasyOCR chosen over gibberish Tesseract "
+                                f"(EasyOCR: {e_len} chars, quality_ok: {easyocr_quality_ok})"
+                            )
+                        else:
+                            best_ocr_result = tesseract_result
+                            best_ocr_text_len = t_len
+                            logger.warning(
+                                f"Both OCR engines produced poor quality. "
+                                f"Using Tesseract ({t_len} chars) as fallback."
+                            )
                     else:
-                        # Both ran — pick the better one.
+                        # Both ran, Tesseract quality is OK — pick by volume.
                         # Lower bar for EasyOCR when Tesseract confidence is weak.
                         min_ratio = 0.5 if t_conf < PDFExtractor.TESSERACT_CONFIDENCE_THRESHOLD else 0.8
                         if e_len >= t_len * min_ratio:
@@ -866,9 +985,12 @@ class PDFExtractor:
                                 f"({t_len} > {e_len} chars)"
                             )
                 else:
-                    logger.warning("EasyOCR extraction failed")
-            elif not tesseract_accepted:
-                logger.warning("❌ EasyOCR not available")
+                    logger.warning(f"EasyOCR extraction failed: {easyocr_result.get('error', 'unknown error')}")
+            elif run_easyocr:
+                logger.warning(
+                    "❌ EasyOCR not available — needed for "
+                    + ("non-Latin script quality comparison" if is_non_latin else "low Tesseract confidence")
+                )
 
             # 4c: Last-resort — use Tesseract even if below threshold
             if best_ocr_result is None and tesseract_result["success"] and t_len > 0:
@@ -1363,48 +1485,74 @@ class PDFExtractor:
     @staticmethod
     def _is_gibberish(text: str) -> bool:
         """
-        Detect if extracted text is gibberish/nonsensical
-        
-        Checks for patterns indicating OCR failure:
-        1. High ratio of consonant clusters (xgy, hfd, vubf)
-        2. Repeated random character patterns
-        3. Very low vowel ratio in English text
-        4. Excessive special characters
+        Detect if extracted text is gibberish/nonsensical.
+
+        Language-aware: skips Latin-only heuristics (vowel ratio, consonant
+        clusters) when the text is primarily non-Latin (Devanagari, Bengali,
+        Tamil, etc.) and uses a script-appropriate quality check instead.
         """
         if not text or len(text) < 20:
             return False
-        
-        # Sample for analysis
-        sample = text[:1000].lower()
-        
-        # Count vowels vs consonants for English text
-        vowels = sum(1 for c in sample if c in 'aeiou')
-        letters = sum(1 for c in sample if c.isalpha())
-        
-        if letters > 50:  # Only check if we have enough letters
+
+        sample = text[:1000]
+
+        # --- Detect dominant script ---
+        non_latin_alpha = sum(1 for c in sample if ord(c) > 0x024F and c.isalpha())
+        latin_alpha = sum(1 for c in sample if c.isascii() and c.isalpha())
+
+        if non_latin_alpha > latin_alpha:
+            # Text is primarily non-Latin — Latin vowel/consonant checks
+            # are meaningless here.  Instead check whether the text has a
+            # reasonable ratio of actual script characters vs noise
+            # (digits, punctuation, control chars, replacement chars).
+            alpha_chars = sum(1 for c in sample if c.isalpha())
+            total_non_space = sum(1 for c in sample if not c.isspace())
+            if total_non_space > 50:
+                alpha_ratio = alpha_chars / total_non_space
+                if alpha_ratio < 0.30:
+                    logger.warning(
+                        f"Non-Latin gibberish: only {alpha_ratio:.0%} alphabetic "
+                        f"chars (non-Latin={non_latin_alpha}, latin={latin_alpha})"
+                    )
+                    return True
+            # Non-Latin text that passes the alpha-ratio check is accepted
+            return False
+
+        # --- Latin-dominant text: original English-centric checks ---
+        sample_lower = sample.lower()
+
+        # 1. Vowel ratio — English text is ~35-45% vowels
+        vowels = sum(1 for c in sample_lower if c in 'aeiou')
+        letters = sum(1 for c in sample_lower if c.isalpha())
+        if letters > 50:
             vowel_ratio = vowels / letters
-            # English text typically has 35-45% vowels
-            # If less than 20%, likely gibberish
             if vowel_ratio < 0.20:
                 logger.warning(f"Detected gibberish: vowel ratio too low ({vowel_ratio:.2%})")
                 return True
-        
-        # Check for excessive consonant clusters (3+ consonants in a row)
-        consonant_clusters = re.findall(r'[bcdfghjklmnpqrstvwxyz]{3,}', sample)
-        if len(consonant_clusters) > 10:
-            logger.warning(f"Detected gibberish: {len(consonant_clusters)} consonant clusters: {consonant_clusters[:5]}")
+
+        # 2. Excessive consonant clusters (4+ Latin consonants in a row)
+        # Note: 3-letter clusters like "str", "rnm", "nts" are common in
+        # English (ministry, government, instruments). Only flag 4+ which
+        # are rare in real words but common in OCR garbage.
+        consonant_clusters = re.findall(r'[bcdfghjklmnpqrstvwxyz]{4,}', sample_lower)
+        words_in_sample = len(sample_lower.split())
+        if words_in_sample > 20 and len(consonant_clusters) / words_in_sample > 0.15:
+            logger.warning(
+                f"Detected gibberish: {len(consonant_clusters)} long consonant "
+                f"clusters in {words_in_sample} words ({len(consonant_clusters)/words_in_sample:.0%}): "
+                f"{consonant_clusters[:5]}"
+            )
             return True
-        
-        # Check for repeated nonsense patterns
-        words = re.findall(r'\b[a-z]{3,}\b', sample)
+
+        # 3. Pronounceability — most English words contain a vowel
+        words = re.findall(r'\b[a-z]{3,}\b', sample_lower)
         if len(words) > 20:
-            # Count how many words are "pronounceable" (have vowels)
             pronounceable = sum(1 for word in words if any(v in word for v in 'aeiou'))
             pronounceable_ratio = pronounceable / len(words)
-            if pronounceable_ratio < 0.60:  # Less than 60% pronounceable
+            if pronounceable_ratio < 0.60:
                 logger.warning(f"Detected gibberish: only {pronounceable_ratio:.2%} pronounceable words")
                 return True
-        
+
         return False
     
     @staticmethod

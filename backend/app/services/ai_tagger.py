@@ -23,40 +23,6 @@ class AITagger:
         'qwen-2.5-vl',
     ]
 
-    # Single-token tags that are too generic to help retrieval.
-    GENERIC_SINGLE_TAGS = {
-        'address', 'contact', 'data', 'department', 'details', 'development', 'document', 'email',
-        'file', 'foundation', 'government', 'hindi', 'india', 'information', 'language', 'ministry',
-        'newsletter', 'office', 'organization', 'pdf', 'phone', 'policy', 'program', 'publication',
-        'report', 'scheme', 'services', 'status', 'welfare',
-        # Procedural/structural terms
-        'tender', 'bid', 'quotation', 'proposal', 'submission', 'opening', 'closing', 'deadline',
-        'notice', 'circular', 'notification', 'order', 'memo', 'letter', 'form', 'application',
-        # Amount/quantity terms
-        'amount', 'crore', 'lakh', 'lakhs', 'rupees', 'rs', 'inr', 'budget', 'cost', 'price',
-        # Generic time terms
-        'date', 'period', 'year', 'month', 'day', 'time', 'duration',
-        # Generic action terms
-        'process', 'procedure', 'method', 'system', 'format', 'type', 'category', 'section',
-    }
-
-    # Generic components that should not form an entire tag by themselves.
-    GENERIC_COMPONENT_TAGS = {
-        'address', 'annual', 'board', 'budget', 'committee', 'contact', 'data', 'department',
-        'details', 'development', 'document', 'email', 'file', 'financial', 'foundation',
-        'government', 'india', 'information', 'language', 'legal', 'members', 'ministry',
-        'newsletter', 'office', 'organization', 'pdf', 'phone', 'policy', 'program',
-        'publication', 'reform', 'report', 'resources', 'roles', 'scheme', 'services',
-        'social', 'status', 'welfare',
-        # Procedural components
-        'tender', 'bid', 'opening', 'closing', 'submission', 'notice', 'box', 'form',
-        'quotation', 'proposal', 'invitation', 'enquiry', 'requirements', 'conditions',
-        # Amount components  
-        'amount', 'cost', 'price', 'value', 'total', 'deposit', 'fee', 'charges',
-        # Generic descriptors
-        'general', 'basic', 'standard', 'normal', 'regular', 'common', 'main', 'other',
-    }
-    
     # Roman numeral pattern — document structure artifacts (Chapter I, Section XXI etc.)
     # Full regex covering i–mmmcmxcix so roman-numeral-only tags are always rejected.
     _ROMAN_RE = re.compile(
@@ -75,44 +41,6 @@ class AITagger:
         'phone number', 'email address',
     })
 
-    # Patterns that indicate low-value procedural tags (compiled for performance)
-    LOW_VALUE_PATTERNS = [
-        # Tender/bid procedural terms
-        re.compile(r'^(?:tender|bid|quotation)[-\s]?(?:opening|closing|submission|notice|box|form|document|details|number|no|id)$', re.I),
-        re.compile(r'^(?:opening|closing|submission)[-\s]?(?:date|time|deadline|period)$', re.I),
-        # Generic deadline/date patterns without specific context
-        re.compile(r'^deadline[-\s]?\d+$', re.I),  # deadline-22, deadline-15
-        re.compile(r'^date[-\s]?\d+$', re.I),
-        # Amount patterns without context
-        re.compile(r'^\d+[-\s]?(?:crore|lakh|lakhs|rupees|rs)s?$', re.I),
-        re.compile(r'^(?:crore|lakh|lakhs)s?[-\s]?\d*$', re.I),
-        # Security/deposit generic terms
-        re.compile(r'^(?:security|earnest|emd)[-\s]?(?:deposit|money|amount)$', re.I),
-        # Generic document terms
-        re.compile(r'^(?:annexure|appendix|attachment|enclosure)[-\s]?[a-z0-9]?$', re.I),
-        # Investment/financial generic
-        re.compile(r'^(?:investment|fixed)[-\s]?(?:tender|deposit|amount)$', re.I),
-        # Generic notice types
-        re.compile(r'^(?:tender|bid|public|general)[-\s]?notice$', re.I),
-        # AI-INVENTED PLACEHOLDER PATTERNS (critical - AI outputs these)
-        re.compile(r'^(?:unique|specific|generic|sample|example)[-\s]?(?:identifier|name|entity|tag|item)[-\s]?\d*$', re.I),
-        re.compile(r'^(?:identifier|entity|item|tag)[-\s]?\d+$', re.I),  # identifier-001, entity-002
-        re.compile(r'^(?:organization|scheme|program|policy|document)[-\s]?(?:name|type|id)$', re.I),
-        re.compile(r'^(?:fiscal|financial|calendar)[-\s]?year$', re.I),
-        re.compile(r'^(?:reference|ref|file)[-\s]?(?:number|no|id)$', re.I),
-        re.compile(r'^(?:time|date)[-\s]?(?:period|range)$', re.I),
-        re.compile(r'^(?:achievement|performance|specific)[-\s]?metrics?$', re.I),
-        re.compile(r'^(?:legal|official|specific)[-\s]?notifications?$', re.I),
-    ]
-
-    # Minimal stopwords list for keyword extraction and overlap scoring.
-    KEYWORD_STOPWORDS = {
-        'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'in', 'into', 'is',
-        'it', 'of', 'on', 'or', 'that', 'the', 'this', 'to', 'with', 'without',
-        'about', 'after', 'before', 'between', 'during', 'under', 'over',
-        'act', 'rule', 'rules', 'section', 'clause', 'article', 'document',
-    }
-    
     def __init__(self, api_key: str, model_name: str = "openai/gpt-4o-mini", exclusion_words: Optional[List[str]] = None):
         self.api_key = api_key
         self.model_name = model_name
@@ -160,7 +88,8 @@ class AITagger:
         num_tags: int = 8,
         detected_language: Optional[str] = None,
         language_name: Optional[str] = None,
-        quality_info: Optional[Dict[str, Any]] = None
+        quality_info: Optional[Dict[str, Any]] = None,
+        extracted_entities: Optional[Dict[str, List[str]]] = None
     ) -> Dict[str, Any]:
         """
         Generate tags for document with exclusion filtering and language awareness
@@ -173,6 +102,7 @@ class AITagger:
             detected_language: Language code (e.g., 'hi', 'en', 'kn', 'ta')
             language_name: Full language name (e.g., 'Hindi', 'English', 'Kannada')
             quality_info: Document quality metrics from PDF extractor
+            extracted_entities: Entity summary from LangExtract (e.g. {"organization": [...], "program": [...]})
 
         Returns:
             dict with tags list and metadata
@@ -221,7 +151,8 @@ class AITagger:
                 prompt = self._build_prompt(
                     title, description, content, requested_tags,
                     detected_language, language_name, quality_info,
-                    already_generated=already
+                    already_generated=already,
+                    extracted_entities=extracted_entities
                 )
 
                 # Rate-limit backoff
@@ -323,7 +254,8 @@ class AITagger:
                         requested_tags,
                         detected_language,
                         language_name,
-                        quality_info
+                        quality_info,
+                        extracted_entities=extracted_entities
                     )
 
                     response = self.client.chat.completions.create(
@@ -613,47 +545,6 @@ class AITagger:
 
         return text
     
-    def _detect_document_type(self, title: str, description: str, content: str) -> str:
-        """
-        Detect document type from content for specialized prompting
-        
-        Returns document type: annual_report, budget, scheme, newsletter, legal, tender, policy, or general
-        """
-        combined = f"{title} {description} {content[:800]}".lower()
-        
-        # Check for specific document types (order matters - more specific first)
-        type_patterns = {
-            'annual_report': ['annual report', 'yearly report', 'financial year', 'fy 20', 'year in review', 'वार्षिक रिपोर्ट'],
-            'budget': ['budget', 'allocation', 'expenditure', 'appropriation', 'बजट', 'आवंटन'],
-            'scheme': ['scheme', 'yojana', 'eligibility', 'application process', 'benefits', 'योजना'],
-            'newsletter': ['newsletter', 'monthly', 'quarterly', 'bulletin', 'समाचार पत्र'],
-            'legal': ['act', 'rules', 'notification', 'gazette', 'section', 'clause', 'अधिनियम'],
-            'tender': ['tender', 'bid', 'procurement', 'quotation', 'निविदा'],
-            'policy': ['policy', 'framework', 'guidelines', 'norms', 'नीति']
-        }
-        
-        for doc_type, keywords in type_patterns.items():
-            if any(kw in combined for kw in keywords):
-                logger.info(f"📄 Detected document type: {doc_type}")
-                return doc_type
-        
-        logger.info(f"📄 Document type: general (no specific pattern matched)")
-        return 'general'
-    
-    def _get_document_type_guidance(self, doc_type: str) -> str:
-        """Return focused tagging guidance based on document type"""
-        guidance = {
-            'annual_report': 'Look for: org name, year like 2023-24, program names, people names.',
-            'budget': 'Look for: ministry name, fiscal year, scheme names, department names.',
-            'scheme': 'Look for: scheme name/acronym, implementing agency, beneficiary group names.',
-            'newsletter': 'Look for: org name, month/quarter, event names, program names.',
-            'legal': 'Look for: act name with year, notification numbers, section numbers.',
-            'tender': 'Look for: tender reference number, issuing organization, item being procured.',
-            'policy': 'Look for: policy name, ministry name, implementation year.',
-            'general': 'Look for: organization names, program names, dates, reference numbers, place names.'
-        }
-        return guidance.get(doc_type, guidance['general'])
-    
     def _get_quality_adjusted_instruction(self, quality_info: Optional[Dict[str, Any]]) -> str:
         """Adjust extraction instructions based on document quality"""
         if not quality_info:
@@ -680,70 +571,6 @@ class AITagger:
         normalized = normalized.replace('-', ' ')
         normalized = re.sub(r'\s+', ' ', normalized).strip()
         return normalized
-
-    def _tokenize_keywords(self, text: str) -> List[str]:
-        """Extract lightweight keyword tokens for relevance scoring."""
-        if not text:
-            return []
-        tokens = re.findall(r'[a-z0-9]{3,}', text.lower())
-        return [t for t in tokens if t not in self.KEYWORD_STOPWORDS]
-
-    def _extract_anchor_terms(
-        self,
-        title: str,
-        description: str,
-        content: str,
-        max_terms: int = 24
-    ) -> List[str]:
-        """
-        Extract high-signal anchor terms generically (years, identifiers, acronyms, title phrases).
-        These anchors are used both in prompting and post-generation re-ranking.
-        """
-        source = f"{title}\n{description}\n{content[:8000]}"
-        anchors: List[str] = []
-
-        # Years and year ranges like 2015, 2024-25, 2023/24.
-        for match in re.findall(r'\b(?:19|20)\d{2}(?:\s*[-/]\s*(?:\d{2,4}))?\b', source):
-            anchors.append(self._normalize_phrase_to_tag(match))
-
-        # Identifier-like phrases common across many document classes.
-        id_pattern = re.compile(
-            r'\b(?:section|sec|rule|article|clause|notification|circular|order|memo|'
-            r'tender|bid|reference|ref|file)\s*[-.:]?\s*[a-z0-9\/\.-]{1,24}\b',
-            flags=re.IGNORECASE
-        )
-        for match in id_pattern.findall(source):
-            anchors.append(self._normalize_phrase_to_tag(match))
-
-        # Acronyms / alphanumeric codes.
-        for match in re.findall(r'\b[A-Z]{2,}(?:[-/][A-Z0-9]{2,})*\b', source):
-            anchors.append(self._normalize_phrase_to_tag(match))
-
-        # Short phrases from title/description tend to be context-defining.
-        for text in [title, description]:
-            words = [w for w in re.findall(r'[a-z0-9]{3,}', text.lower()) if w not in self.KEYWORD_STOPWORDS]
-            for n in (3, 2):
-                for i in range(0, max(0, len(words) - n + 1)):
-                    phrase = "-".join(words[i:i + n])
-                    if 5 <= len(phrase) <= 45:
-                        anchors.append(phrase)
-
-        # Deduplicate while preserving order and dropping low-value artifacts.
-        deduped: List[str] = []
-        seen: Set[str] = set()
-        for term in anchors:
-            if not term or len(term) < 3 or term in seen:
-                continue
-            if term in self.GENERIC_SINGLE_TAGS:
-                continue
-            if term.isdigit() and len(term) < 4:
-                continue
-            seen.add(term)
-            deduped.append(term)
-            if len(deduped) >= max_terms:
-                break
-
-        return deduped
 
     def _build_content_preview(self, content: str, max_chars: int = 5000) -> str:
         """
@@ -808,18 +635,6 @@ class AITagger:
             preview = preview[:max_chars].rstrip() + "\n...[truncated]"
         return preview
 
-    def _build_composition_instruction(self, num_tags: int) -> str:
-        """Create soft tag-composition targets that improve distinctiveness."""
-        entity_min = max(2, round(num_tags * 0.35))
-        broad_max = max(1, round(num_tags * 0.25))
-        include_time = "yes" if num_tags >= 5 else "if available"
-        return (
-            f"- Aim for at least {entity_min} entity/program/institution tags.\n"
-            f"- Include a time/version tag ({include_time}) when years or periods exist.\n"
-            f"- Include legal/procedural identifier tags when present (section/rule/notification/tender no.).\n"
-            f"- Keep broad thematic tags to at most {broad_max}."
-        )
-    
     def _build_prompt(
         self,
         title: str,
@@ -829,16 +644,16 @@ class AITagger:
         detected_language: Optional[str] = None,
         language_name: Optional[str] = None,
         quality_info: Optional[Dict[str, Any]] = None,
-        anchor_terms: Optional[List[str]] = None,
-        already_generated: Optional[List[str]] = None
+        already_generated: Optional[List[str]] = None,
+        extracted_entities: Optional[Dict[str, List[str]]] = None
     ) -> str:
         """
         Build a tiered JSON prompt.
 
-        Asks the LLM to categorise tags into three priority tiers:
-          names    — specific named things (programs, schemes, acts + year, orgs)
-          subjects — what the document is about (topic, beneficiary, purpose)
-          context  — supporting identifiers (year, portal, reference number)
+        Two paths:
+        - Entity-enriched: when LangExtract provided real entities, the LLM selects
+          from grounded facts instead of guessing from a short snippet.
+        - Fallback: existing behavior when no entities are available.
 
         The LLM's ordering is trusted directly; no re-ranking is applied downstream.
         """
@@ -876,11 +691,39 @@ class AITagger:
                 f"{', '.join(already_generated[:15])}"
             )
 
+        # Build entity context block when entities are available
+        entity_block = ""
+        if extracted_entities:
+            entity_lines = []
+            doc_types = extracted_entities.get("document_type", [])
+            for cls, values in extracted_entities.items():
+                if not values or cls == "document_type":
+                    continue
+                entity_lines.append(f"  {cls}: {', '.join(values[:10])}")
+            if entity_lines:
+                doc_type_instruction = ""
+                if doc_types:
+                    doc_type_instruction = (
+                        f"\n\nIMPORTANT: This document is a '{doc_types[0]}'. "
+                        "Always include the document type (e.g. 'question paper', 'sanction order', "
+                        "'gazette notification') as one of the 'actions' tags."
+                    )
+                entity_block = (
+                    "\n\nENTITIES FOUND IN DOCUMENT:\n"
+                    + "\n".join(entity_lines)
+                    + "\n\nPrioritize these real entities when generating tags. "
+                    "Prefer specific named entities over generic descriptions. "
+                    "You may condense long names (e.g. 'pradhan mantri anusuchit jaati abhyuday yojana' → 'pm ajay yojana') "
+                    "to fit the word limit."
+                    + doc_type_instruction
+                )
+                logger.info(f"🏷️ Entity context added to prompt: {len(entity_lines)} categories")
+
         prompt = f"""Analyze the document below and return exactly {num_tags} search tags as a JSON object.{language_hint}{quality_hint}
 
 DOCUMENT:
 Title: {title}
-{f'Description: {description}' if description else ''}
+{f'Description: {description}' if description else ''}{entity_block}
 
 {content_preview}
 
@@ -894,157 +737,21 @@ Return ONLY a valid JSON object — no prose, no markdown, no explanation:
 Tier rules (fill each tier; combined total = {num_tags}):
 - "names"    → Specific NAMED things: program/scheme/initiative names, acts (abbreviated, e.g. "rights act 2019"), specific organisations by their actual name. ~{n_names} tags. HIGHEST priority.
 - "subjects" → What the document is about: beneficiary groups, domain, core topic. ~{n_subjects} tags.
-- "actions"  → What the document does: purpose like "expression of interest", "recruitment", "guidelines", "circular". ~{n_action} tags.
+- "actions"  → What the document IS and DOES: document type (e.g. "question paper", "sanction order", "notification", "circular", "tender") plus purpose (e.g. "recruitment", "guidelines"). ~{n_action} tags. Always include the document type.
 
 Tag format rules:
-- 1–4 words, all lowercase, space-separated (no hyphens, no underscores).
+- 1–7 words, all lowercase, space-separated (no hyphens, no underscores).
 - Every tag must come from actual text in the document — no invented terms.
-- NO dates, years, or reference numbers — these are not search tags.
-- NO bare section numbers, NO generic legal boilerplate (memorandum of association, articles of association).{exclusion_hint}{already_hint}"""
+- Years ARE allowed when paired with a name (e.g. "budget 2024-25", "act 2016"). Standalone years are NOT tags.
+- NO bare section numbers, NO reference numbers, NO generic legal boilerplate (memorandum of association, articles of association).{exclusion_hint}{already_hint}"""
 
         return prompt
-
-    def _is_overly_generic_without_qualifier(self, tag: str) -> bool:
-        """
-        Generic-quality gate:
-        - reject standalone generic tags
-        - reject multi-part tags where all components are generic and no numeric qualifier exists
-        - reject tags matching low-value procedural patterns
-        """
-        normalized = self._normalize_phrase_to_tag(tag)
-        if not normalized:
-            return True
-
-        # Check against low-value patterns FIRST (these are always generic regardless of numbers)
-        for pattern in self.LOW_VALUE_PATTERNS:
-            if pattern.match(normalized):
-                logger.debug(f"Tag '{normalized}' matched low-value pattern")
-                return True
-
-        # Numbers alone don't make a tag valuable if it's fundamentally procedural
-        # Only allow numbers to "save" a tag if the base isn't purely procedural
-        parts = [p for p in normalized.split('-') if p]
-        if not parts:
-            return True
-
-        # Check single-word tags
-        if len(parts) == 1:
-            return parts[0] in self.GENERIC_SINGLE_TAGS
-
-        # For multi-part tags: check if ALL non-numeric parts are generic
-        non_numeric_parts = [p for p in parts if not p.isdigit()]
-        
-        # If all non-numeric parts are generic components, it's too generic
-        # UNLESS it contains a specific identifier pattern (like tender number, section number)
-        if all(part in self.GENERIC_COMPONENT_TAGS for part in non_numeric_parts):
-            # Check if it has a meaningful identifier pattern
-            has_identifier = bool(re.search(r'(?:no|number|ref|id)[-\s]?[a-z0-9]+', normalized, re.I))
-            if not has_identifier:
-                return True
-
-        return False
-
-    def _jaccard_similarity(self, left: str, right: str) -> float:
-        """Simple token-level similarity used for diversity-aware selection."""
-        left_tokens = set(left.split('-'))
-        right_tokens = set(right.split('-'))
-        if not left_tokens or not right_tokens:
-            return 0.0
-        union = left_tokens | right_tokens
-        if not union:
-            return 0.0
-        return len(left_tokens & right_tokens) / len(union)
-
-    def _score_tag(
-        self,
-        tag: str,
-        anchor_terms: Set[str],
-        context_tokens: Set[str]
-    ) -> float:
-        """
-        Score a candidate tag for distinctiveness and retrieval utility.
-        Higher is better. Heavily penalizes generic/procedural terms.
-        """
-        score = 0.0
-        normalized = self._normalize_phrase_to_tag(tag)
-        parts = [p for p in normalized.split('-') if p]
-
-        # Mild reward for alphanumeric identifiers (reduced - was +2.5)
-        # This no longer lets salary figures and addresses dominate
-        if re.search(r'[a-z].*\d.*[a-z]|[a-z]{2,}\d{4}|\d{4}[a-z]{2,}', normalized):
-            score += 0.8
-
-        # Reward years in context (fiscal years, report years)
-        if re.search(r'(?:fy[-\s]?)?\d{4}(?:[-/]\d{2,4})?', normalized):
-            score += 1.5
-
-        # Reward multi-part tags that aren't all generic
-        if len(parts) >= 2:
-            non_generic_parts = [p for p in parts if p not in self.GENERIC_COMPONENT_TAGS]
-            if non_generic_parts:
-                score += 0.6 * len(non_generic_parts)
-
-        # Reward overlap with extracted anchors (highest-signal terms)
-        if normalized in anchor_terms:
-            score += 4.0  # Exact anchor matches are very valuable
-        elif any(normalized in anchor or anchor in normalized for anchor in anchor_terms if len(anchor) >= 4):
-            score += 2.5
-
-        # Reward overlap with title/description keywords (but not generic ones)
-        non_generic_context = context_tokens - self.GENERIC_COMPONENT_TAGS - self.GENERIC_SINGLE_TAGS
-        overlap = sum(1 for p in parts if p in non_generic_context)
-        score += min(overlap, 3) * 0.8
-
-        # Reward acronym-style tags (often organization/scheme identifiers)
-        if re.match(r'^[a-z]{2,6}$', normalized) and normalized.upper() == normalized.upper():
-            score += 1.2
-
-        # Reward named entity patterns (programs, schemes, missions)
-        if re.search(r'(?:foundation|mission|scheme|yojana|abhiyan|portal|programme|program)', normalized):
-            score += 1.0
-
-        # Reward specific identifier patterns WITH reference numbers
-        if re.search(r'\b(?:no|ref|id)[-\s]?[a-z0-9]+', normalized):
-            score += 1.5
-
-        # --- PENALTIES ---
-
-        # Penalize incidental metadata (salary, address, experience, post counts)
-        # These appear in every govt document and have zero search utility
-        if re.search(r'^rs[-\s]?\d+', normalized):
-            score -= 4.0  # salary amounts
-        if re.search(r'^(?:sector|plot|block|floor|wing|building)[-\s](?:no[-\s]?)?[a-z0-9-]{1,10}$', normalized):
-            score -= 4.0  # address fragments
-        if re.search(r'(?:experience|age)[-\s](?:more[-\s]than[-\s]|less[-\s]than[-\s]|limit[-\s]|upto[-\s])?\d', normalized):
-            score -= 3.5  # experience/age requirements
-        if re.search(r'^no[-\s]of[-\s](?:post|posts|vacancy|vacancies)', normalized):
-            score -= 3.0  # post count labels
-        if re.search(r'^(?:date|dated|last[-\s]date)[-\s]', normalized):
-            score -= 2.5  # pure date labels
-        if re.search(r'(?:^|\b)\d{5,6}(?:$|\b)', normalized):
-            score -= 2.5  # pin codes
-
-        # Generic/procedural tag penalties
-        if self._is_overly_generic_without_qualifier(normalized):
-            score -= 4.0
-
-        procedural_starters = {'tender', 'bid', 'quotation', 'opening', 'closing', 'deadline', 'submission', 'security'}
-        if parts and parts[0] in procedural_starters:
-            score -= 2.5
-
-        if parts and all(p in self.GENERIC_COMPONENT_TAGS for p in parts):
-            score -= 3.0
-
-        if len(parts) == 1 and parts[0] in self.GENERIC_SINGLE_TAGS:
-            score -= 3.5
-
-        return score
 
     def _select_best_tags(
         self,
         tags: List[str],
         num_tags: int,
-        **kwargs  # absorb legacy keyword arguments (anchor_terms, title, description)
+        **kwargs
     ) -> List[str]:
         """
         Deduplicate and return the first num_tags in the order they arrived.
@@ -1196,8 +903,8 @@ Tag format rules:
                 rejected.append(tag)
                 continue
 
-            # 4-word maximum (allows "rights act 2019" style act names)
-            if len(words) > 4:
+            # 7-word maximum (allows "department of animal husbandry and dairying" style govt names)
+            if len(words) > 7:
                 logger.debug(f"Rejected (too long): '{tag}'")
                 rejected.append(tag)
                 continue
