@@ -711,10 +711,16 @@ class AITagger:
                 entity_block = (
                     "\n\nENTITIES FOUND IN DOCUMENT:\n"
                     + "\n".join(entity_lines)
-                    + "\n\nPrioritize these real entities when generating tags. "
-                    "Prefer specific named entities over generic descriptions. "
-                    "You may condense long names (e.g. 'pradhan mantri anusuchit jaati abhyuday yojana' → 'pm ajay yojana') "
-                    "to fit the word limit."
+                    + "\n\nUse these entities to generate specific, searchable tags. "
+                    "A GOOD tag distinguishes THIS document from others in the same collection. "
+                    "A BAD tag would appear on every document from the same source. "
+                    "AVOID as tags: person names (ministers, signatories, officials) unless the document "
+                    "is specifically ABOUT that person; generic phrases (community engagement, public "
+                    "participation, youth involvement, capacity building); and single vague words "
+                    "(update, support, development, progress). "
+                    "PREFER: program/scheme names, specific organization names, legislation with year, "
+                    "concrete topics unique to this document. "
+                    "You may condense long names (e.g. 'pradhan mantri anusuchit jaati abhyuday yojana' → 'pm ajay yojana')."
                     + doc_type_instruction
                 )
                 logger.info(f"🏷️ Entity context added to prompt: {len(entity_lines)} categories")
@@ -735,12 +741,12 @@ Return ONLY a valid JSON object — no prose, no markdown, no explanation:
 }}
 
 Tier rules (fill each tier; combined total = {num_tags}):
-- "names"    → Specific NAMED things: program/scheme/initiative names, acts (abbreviated, e.g. "rights act 2019"), specific organisations by their actual name. ~{n_names} tags. HIGHEST priority.
-- "subjects" → What the document is about: beneficiary groups, domain, core topic. ~{n_subjects} tags.
-- "actions"  → What the document IS and DOES: document type (e.g. "question paper", "sanction order", "notification", "circular", "tender") plus purpose (e.g. "recruitment", "guidelines"). ~{n_action} tags. Always include the document type.
+- "names"    → Specific NAMED things: program/scheme/initiative names, acts (abbreviated, e.g. "rights act 2019"), specific organisations. ~{n_names} tags. HIGHEST priority. NO person names unless the document is about that person.
+- "subjects" → What the document is SPECIFICALLY about: concrete topics, sectors, beneficiary groups unique to this document. ~{n_subjects} tags. NO generic phrases like "community engagement" or "public participation".
+- "actions"  → What the document IS and DOES: document type (e.g. "question paper", "sanction order", "newsletter") plus specific purpose. ~{n_action} tags. Always include the document type.
 
 Tag format rules:
-- 1–7 words, all lowercase, space-separated (no hyphens, no underscores).
+- 1–5 words, all lowercase, space-separated (no hyphens, no underscores).
 - Every tag must come from actual text in the document — no invented terms.
 - Years ARE allowed when paired with a name (e.g. "budget 2024-25", "act 2016"). Standalone years are NOT tags.
 - NO bare section numbers, NO reference numbers, NO generic legal boilerplate (memorandum of association, articles of association).{exclusion_hint}{already_hint}"""
