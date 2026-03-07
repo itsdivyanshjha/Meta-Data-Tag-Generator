@@ -223,8 +223,15 @@ class AsyncBatchProcessor:
                     }
                     await redis_client.publish_progress(job.job_id, processing_update)
 
-                    # Process the document
-                    result = await self._process_single_document(doc_info, job.config, tagger)
+                    # Process the document (5-minute timeout per document)
+                    try:
+                        result = await asyncio.wait_for(
+                            self._process_single_document(doc_info, job.config, tagger),
+                            timeout=300
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(f"Document timed out after 5 minutes: {title}")
+                        result = {"success": False, "error": "Processing timed out (5 minutes)"}
 
                     # Update job stats
                     if result["success"]:
@@ -458,7 +465,9 @@ class AsyncBatchProcessor:
                 return result
 
             pdf_bytes = download_result["file_bytes"]
-            extraction_result = self.extractor.extract_text(pdf_bytes, config.num_pages, ocr_dpi=300)
+            extraction_result = await asyncio.to_thread(
+                self.extractor.extract_text, pdf_bytes, config.num_pages, ocr_dpi=300
+            )
             del pdf_bytes
             download_result.pop("file_bytes", None)
 

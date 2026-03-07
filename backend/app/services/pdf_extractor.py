@@ -73,52 +73,63 @@ def _easyocr_subprocess_worker(
 
         reader = easyocr.Reader(languages, gpu=False, verbose=False)
 
-        images = convert_from_bytes(
-            pdf_bytes,
-            first_page=1,
-            last_page=num_pages,
-            dpi=dpi
-        )
-
         extracted_text = ""
         confidence_scores = []
 
-        for idx, image in enumerate(images):
-            # Convert to grayscale + enhance contrast
-            image = image.convert('L')
-            enhancer = ImageEnhance.Contrast(image)
-            image = enhancer.enhance(2.0)
+        # Process one page at a time to limit memory
+        for page_idx in range(num_pages):
+            image = None
+            try:
+                page_images = convert_from_bytes(
+                    pdf_bytes,
+                    first_page=page_idx + 1,
+                    last_page=page_idx + 1,
+                    dpi=dpi
+                )
+                if not page_images:
+                    continue
+                image = page_images[0]
+                del page_images
 
-            # Resize to limit memory during inference
-            w, h = image.size
-            max_dim = max(w, h)
-            if max_dim > max_dimension:
-                scale = max_dimension / max_dim
-                new_w = int(w * scale)
-                new_h = int(h * scale)
-                image = image.resize((new_w, new_h), PILImage.LANCZOS)
+                # Convert to grayscale + enhance contrast
+                image = image.convert('L')
+                enhancer = ImageEnhance.Contrast(image)
+                image = enhancer.enhance(2.0)
 
-            img_array = np.array(image)
+                # Resize to limit memory during inference
+                w, h = image.size
+                max_dim = max(w, h)
+                if max_dim > max_dimension:
+                    scale = max_dimension / max_dim
+                    new_w = int(w * scale)
+                    new_h = int(h * scale)
+                    image = image.resize((new_w, new_h), PILImage.LANCZOS)
 
-            results = reader.readtext(img_array, detail=1)
+                img_array = np.array(image)
 
-            page_text_parts = []
-            page_confidences = []
-            for (bbox, text, conf) in results:
-                if text.strip():
-                    page_text_parts.append(text)
-                    page_confidences.append(conf * 100)
+                results = reader.readtext(img_array, detail=1)
 
-            page_text = ' '.join(page_text_parts)
-            extracted_text += page_text + "\n"
+                page_text_parts = []
+                page_confidences = []
+                for (bbox, text, conf) in results:
+                    if text.strip():
+                        page_text_parts.append(text)
+                        page_confidences.append(conf * 100)
 
-            if page_confidences:
-                avg_conf = sum(page_confidences) / len(page_confidences)
-                confidence_scores.append(avg_conf)
+                page_text = ' '.join(page_text_parts)
+                extracted_text += page_text + "\n"
 
-            # Free image memory between pages
-            del img_array, image
-            gc.collect()
+                if page_confidences:
+                    avg_conf = sum(page_confidences) / len(page_confidences)
+                    confidence_scores.append(avg_conf)
+
+                del img_array
+            except Exception as page_err:
+                import traceback
+                traceback.print_exc()
+            finally:
+                del image
+                gc.collect()
 
         overall_confidence = (
             sum(confidence_scores) / len(confidence_scores)
@@ -431,13 +442,15 @@ class PDFExtractor:
 
         try:
             # Render just the first page at low DPI for speed
-            images = PDFExtractor._render_pdf_pages_pymupdf(pdf_bytes, num_pages=1, dpi=150)
-            if not images:
+            image = PDFExtractor._render_pdf_page_pymupdf(pdf_bytes, page_num=0, dpi=150)
+            if image is None:
                 logger.warning("Could not render page for script detection")
                 return PDFExtractor.DEFAULT_LANGUAGE
 
             # Run Tesseract OSD — detects script without needing the right language pack
-            osd_output = pytesseract.image_to_osd(images[0])
+            osd_output = pytesseract.image_to_osd(image, timeout=30)
+            del image
+            gc.collect()
             logger.info(f"Tesseract OSD output: {osd_output}")
 
             # Parse "Script: Kannada" from OSD output
@@ -621,34 +634,45 @@ class PDFExtractor:
         )
 
     @staticmethod
-    def _render_pdf_pages_pymupdf(pdf_bytes: bytes, num_pages: int, dpi: int = 300):
+    def _render_pdf_page_pymupdf(pdf_bytes: bytes, page_num: int, dpi: int = 300):
         """
-        Render PDF pages to PIL Images using PyMuPDF (fitz).
+        Render a SINGLE PDF page to a PIL Image using PyMuPDF (fitz).
 
-        PyMuPDF uses its own rendering engine which handles a much wider range
-        of embedded image types than poppler/pdf2image — including JBIG2, CCITT
-        Group 4, unusual XObject structures, and eOffice-style overlays that
-        cause pdf2image to silently produce blank frames.
-
-        Returns a list of PIL Images, or [] if PyMuPDF is unavailable or fails.
+        Processes one page at a time to keep memory usage constant regardless
+        of document length. The caller is responsible for freeing the image
+        after use.
         """
         if not PYMUPDF_AVAILABLE:
-            return []
+            return None
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            if page_num >= len(doc):
+                doc.close()
+                return None
             zoom = dpi / 72.0
             mat = fitz.Matrix(zoom, zoom)
-            images = []
-            for page_num in range(min(num_pages, len(doc))):
-                page = doc[page_num]
-                pix = page.get_pixmap(matrix=mat, alpha=False)
-                img = Image.open(_io.BytesIO(pix.tobytes("png")))
-                images.append(img.copy())
+            page = doc[page_num]
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img = Image.open(_io.BytesIO(pix.tobytes("png"))).copy()
+            pix = None  # Free pixmap immediately
             doc.close()
-            return images
+            return img
         except Exception as e:
-            logger.error(f"PyMuPDF rendering failed: {e}")
-            return []
+            logger.error(f"PyMuPDF rendering page {page_num + 1} failed: {e}")
+            return None
+
+    @staticmethod
+    def _get_pdf_page_count_pymupdf(pdf_bytes: bytes) -> int:
+        """Get total page count using PyMuPDF."""
+        if not PYMUPDF_AVAILABLE:
+            return 0
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            count = len(doc)
+            doc.close()
+            return count
+        except Exception:
+            return 0
 
     @staticmethod
     def _extract_with_pymupdf_tesseract(
@@ -686,34 +710,50 @@ class PDFExtractor:
             f"({languages}) at {dpi} DPI"
         )
 
-        images = PDFExtractor._render_pdf_pages_pymupdf(pdf_bytes, num_pages, dpi)
-        if not images:
+        total_pages = PDFExtractor._get_pdf_page_count_pymupdf(pdf_bytes)
+        if total_pages == 0:
             fail_result["error"] = "PyMuPDF produced no renderable pages"
             return fail_result
 
+        pages_to_process = min(num_pages, total_pages)
         extracted_text = ""
         confidence_scores = []
+        pages_done = 0
 
-        for idx, image in enumerate(images):
+        # Process ONE page at a time — never hold more than 1 image in memory
+        for idx in range(pages_to_process):
+            image = None
             try:
+                image = PDFExtractor._render_pdf_page_pymupdf(pdf_bytes, idx, dpi)
+                if image is None:
+                    logger.warning(f"PyMuPDF+Tesseract page {idx + 1}: render failed, skipping")
+                    continue
                 image = image.convert("L")
                 image = ImageEnhance.Contrast(image).enhance(2.0)
                 page_text = pytesseract.image_to_string(
-                    image, lang=languages, config="--psm 3 --oem 1"
+                    image, lang=languages, config="--psm 3 --oem 1",
+                    timeout=60
                 )
                 ocr_data = pytesseract.image_to_data(
-                    image, lang=languages, output_type=pytesseract.Output.DICT
+                    image, lang=languages, output_type=pytesseract.Output.DICT,
+                    timeout=60
                 )
                 valid_confs = [c for c in ocr_data["conf"] if c > 0]
                 if valid_confs:
                     confidence_scores.append(sum(valid_confs) / len(valid_confs))
                 extracted_text += page_text + "\n"
+                pages_done += 1
                 logger.info(
                     f"PyMuPDF+Tesseract page {idx + 1}: "
                     f"{len(page_text)} chars"
                 )
+            except RuntimeError as timeout_err:
+                logger.warning(f"PyMuPDF+Tesseract page {idx + 1} timed out: {timeout_err}")
             except Exception as page_err:
                 logger.error(f"PyMuPDF+Tesseract page {idx + 1} error: {page_err}")
+            finally:
+                del image
+                gc.collect()
 
         extracted_text = PDFExtractor._clean_text_unicode_safe(extracted_text)
         overall_confidence = (
@@ -728,8 +768,8 @@ class PDFExtractor:
         return {
             "success": True,
             "extracted_text": extracted_text,
-            "page_count": len(images),
-            "pages_extracted": len(images),
+            "page_count": pages_to_process,
+            "pages_extracted": pages_done,
             "title": title,
             "is_scanned": True,
             "extraction_method": "pymupdf_tesseract",
@@ -1204,90 +1244,89 @@ class PDFExtractor:
             lang_name = PDFExtractor.OCR_LANGUAGE_MAP.get(detected_language, {}).get('name', 'Unknown')
             logger.info(f"Starting Tesseract OCR for {lang_name} with languages: {languages} at {dpi} DPI")
 
-            # Convert PDF to images
-            images = convert_from_bytes(
-                pdf_bytes,
-                first_page=1,
-                last_page=num_pages,
-                dpi=dpi
-            )
-            
-            logger.info(f"Converted PDF to {len(images)} images")
-            
-            # OCR each image
+            # OCR one page at a time — constant memory regardless of page count
             extracted_text = ""
             confidence_scores = []
-            
-            for idx, image in enumerate(images):
-                logger.info(f"Processing page {idx + 1}/{len(images)} with OCR...")
-                
-                # Preprocess image for better OCR
+            pages_done = 0
+
+            for page_idx in range(num_pages):
+                image = None
                 try:
-                    # Convert to grayscale and enhance contrast
-                    image = image.convert('L')  # Grayscale
-                    
-                    # Apply contrast enhancement for low-quality scans
-                    enhancer = ImageEnhance.Contrast(image)
-                    image = enhancer.enhance(2.0)  # Increase contrast
-                except Exception as prep_error:
-                    logger.warning(f"Image preprocessing failed: {prep_error}, using original")
-                
-                # Perform OCR with proper Hindi/Devanagari support
-                try:
-                    # Try multiple PSM modes for better results
-                    # PSM 3: Automatic page segmentation (usually best for mixed content)
+                    # Convert single page to image
+                    page_images = convert_from_bytes(
+                        pdf_bytes,
+                        first_page=page_idx + 1,
+                        last_page=page_idx + 1,
+                        dpi=dpi
+                    )
+                    if not page_images:
+                        continue
+                    image = page_images[0]
+                    del page_images
+
+                    logger.info(f"Processing page {page_idx + 1}/{num_pages} with OCR...")
+
+                    # Preprocess: grayscale + contrast
+                    try:
+                        image = image.convert('L')
+                        image = ImageEnhance.Contrast(image).enhance(2.0)
+                    except Exception as prep_error:
+                        logger.warning(f"Image preprocessing failed: {prep_error}, using original")
+
+                    # OCR
                     page_text = pytesseract.image_to_string(
                         image,
                         lang=languages,
-                        config='--psm 3 --oem 1'  # PSM 3: auto, OEM 1: neural nets LSTM
+                        config='--psm 3 --oem 1',
+                        timeout=60
                     )
-                    
-                    # Get confidence scores
+
                     ocr_data = pytesseract.image_to_data(
-                        image, 
+                        image,
                         lang=languages,
-                        output_type=pytesseract.Output.DICT
+                        output_type=pytesseract.Output.DICT,
+                        timeout=60
                     )
-                    
-                    # Calculate average confidence for this page
+
                     valid_confidences = [c for c in ocr_data['conf'] if c > 0]
                     if valid_confidences:
                         avg_confidence = sum(valid_confidences) / len(valid_confidences)
                         confidence_scores.append(avg_confidence)
-                    
+
                     extracted_text += page_text + "\n"
-                    
-                    # Log first 200 chars to check encoding
-                    logger.info(f"OCR text sample: {page_text[:200]}")
-                    
+                    pages_done += 1
+                    logger.info(f"OCR page {page_idx + 1}: {len(page_text)} chars")
+
+                except RuntimeError as timeout_err:
+                    logger.warning(f"OCR page {page_idx + 1} timed out (60s): {timeout_err}")
                 except Exception as page_error:
-                    logger.error(f"Error OCR'ing page {idx + 1}: {str(page_error)}")
-                    continue
-            
+                    logger.error(f"Error OCR'ing page {page_idx + 1}: {str(page_error)}")
+                finally:
+                    del image
+                    gc.collect()
+
             # Light cleaning - preserve Hindi characters
             extracted_text = PDFExtractor._clean_text_unicode_safe(extracted_text)
-            
+
             # Check for gibberish in OCR output
             if PDFExtractor._is_gibberish(extracted_text):
                 logger.warning("⚠️ Detected gibberish in Tesseract OCR output. Quality may be poor.")
-            
-            # Calculate overall OCR confidence
+
             overall_confidence = (
-                sum(confidence_scores) / len(confidence_scores) 
+                sum(confidence_scores) / len(confidence_scores)
                 if confidence_scores else 0
             )
-            
-            # Extract title from OCR'd text
+
             title = PDFExtractor._extract_title_from_text(extracted_text)
-            
+
             logger.info(f"OCR extraction complete. Confidence: {overall_confidence:.1f}%")
             logger.info(f"Extracted text length: {len(extracted_text)} chars")
-            
+
             return {
                 "success": True,
                 "extracted_text": extracted_text,
-                "page_count": len(images),
-                "pages_extracted": len(images),
+                "page_count": num_pages,
+                "pages_extracted": pages_done,
                 "title": title,
                 "is_scanned": True,
                 "extraction_method": "tesseract_ocr",
