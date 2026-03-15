@@ -31,9 +31,6 @@ class Settings(BaseSettings):
     max_tags: int = 15
     min_tags: int = 3
 
-    # Text Processing
-    max_words_for_ai: int = 2000
-
     # Entity Extraction (LLM pre-processing before tagging)
     entity_extraction_max_chars: int = 15000  # Max chars sent to entity extractor per document
     

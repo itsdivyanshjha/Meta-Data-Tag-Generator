@@ -125,22 +125,23 @@ class AITagger:
             # Cap how many tags we ask for based on content length.
             # One tag per ~8 words is generous; prevents hallucination on short content.
             content_words = len(content.split()) if content else 0
-            max_derivable = max(num_tags, content_words // 8) if content_words > 0 else num_tags * 2
+            max_derivable = max(num_tags * 3, content_words // 8) if content_words > 0 else num_tags * 3
 
-            # Small buffer: ask for a bit more than needed to absorb exclusion filtering,
-            # but never so many that the LLM has to hallucinate to fill the quota.
-            buffer = min(num_tags + 6, max_derivable)
+            # Over-request 3x to absorb exclusion filter losses in one shot.
+            # With ~60% exclusion rate, 3x gives ~40% survivors = enough for target.
+            buffer = min(num_tags * 3, max_derivable)
 
             all_collected_tags: List[str] = []
             total_tokens_used = 0
-            max_attempts = 2  # Tiered JSON is high quality; rarely needs a retry
+            max_attempts = 2  # Second attempt is emergency fallback only
 
             for attempt in range(max_attempts):
                 tags_still_needed = num_tags - len(all_collected_tags)
                 if tags_still_needed <= 0:
                     break
 
-                requested_tags = min(tags_still_needed + 6, buffer)
+                # First attempt gets full budget; retry asks for remainder + buffer
+                requested_tags = buffer if attempt == 0 else min(tags_still_needed + 8, buffer)
                 logger.info(
                     f"🎯 Attempt {attempt + 1}/{max_attempts}: need {tags_still_needed}, "
                     f"requesting {requested_tags} (content: {content_words} words, "
@@ -152,7 +153,8 @@ class AITagger:
                     title, description, content, requested_tags,
                     detected_language, language_name, quality_info,
                     already_generated=already,
-                    extracted_entities=extracted_entities
+                    extracted_entities=extracted_entities,
+                    tier_target=num_tags  # Tier distribution based on real target, not inflated request
                 )
 
                 # Rate-limit backoff
@@ -572,10 +574,11 @@ class AITagger:
         normalized = re.sub(r'\s+', ' ', normalized).strip()
         return normalized
 
-    def _build_content_preview(self, content: str, max_chars: int = 5000) -> str:
+    def _build_content_preview(self, content: str, max_chars: int = 15000) -> str:
         """
-        Build representative context with start/middle/end snippets, subject lines,
-        and high-signal lines. Larger window to capture more substantive content.
+        Build representative context from extracted text. Passes full text when
+        possible (up to 15K chars ≈ 3750 tokens). Only uses START/MIDDLE/END
+        chunking as a fallback for very large documents.
         """
         if not content:
             return ""
@@ -594,7 +597,7 @@ class AITagger:
             if 10 < len(line) < 300:
                 subject_lines.append(line)
 
-        window = 1200
+        window = 4000
         start_chunk = text[:window]
         middle_start = max(0, (len(text) // 2) - (window // 2))
         middle_chunk = text[middle_start:middle_start + window]
@@ -645,7 +648,8 @@ class AITagger:
         language_name: Optional[str] = None,
         quality_info: Optional[Dict[str, Any]] = None,
         already_generated: Optional[List[str]] = None,
-        extracted_entities: Optional[Dict[str, List[str]]] = None
+        extracted_entities: Optional[Dict[str, List[str]]] = None,
+        tier_target: Optional[int] = None
     ) -> str:
         """
         Build a tiered JSON prompt.
@@ -664,10 +668,13 @@ class AITagger:
         content_preview = self._build_content_preview(content)
         quality_hint = self._get_quality_adjusted_instruction(quality_info)
 
-        # Tier size guidance (soft targets, not hard limits)
-        n_names    = max(1, round(num_tags * 0.50))
-        n_subjects = max(1, round(num_tags * 0.30))
-        n_action   = max(1, num_tags - n_names - n_subjects)
+        # Tier size guidance based on real target, not inflated request count.
+        # When over-requesting (e.g. 30 for target of 10), tiers stay at 5/3/2
+        # so the LLM doesn't pad "names" with 15 state names.
+        t = tier_target if tier_target else num_tags
+        n_names    = max(1, round(t * 0.50))
+        n_subjects = max(1, round(t * 0.30))
+        n_action   = max(1, t - n_names - n_subjects)
 
         language_hint = ""
         if language_name and detected_language != 'en':
@@ -678,10 +685,10 @@ class AITagger:
 
         exclusion_hint = ""
         if self.exclusion_words:
-            sample = list(self.exclusion_words)[:15]
+            all_excluded = ', '.join(sorted(self.exclusion_words))
             exclusion_hint = (
-                f"\nDo NOT generate tags containing any of these excluded terms: "
-                f"{', '.join(sample)} (and similar)."
+                f"\nDo NOT generate tags that match or substantially overlap with these excluded terms:\n"
+                f"{all_excluded}"
             )
 
         already_hint = ""
@@ -704,23 +711,16 @@ class AITagger:
                 doc_type_instruction = ""
                 if doc_types:
                     doc_type_instruction = (
-                        f"\n\nIMPORTANT: This document is a '{doc_types[0]}'. "
-                        "Always include the document type (e.g. 'question paper', 'sanction order', "
-                        "'gazette notification') as one of the 'actions' tags."
+                        f"\nThis document is a '{doc_types[0]}'. "
+                        "Include the document type as one of the 'actions' tags."
                     )
                 entity_block = (
-                    "\n\nENTITIES FOUND IN DOCUMENT:\n"
+                    "\n\nCONTEXT — entities found in this document:\n"
                     + "\n".join(entity_lines)
-                    + "\n\nUse these entities to generate specific, searchable tags. "
-                    "A GOOD tag distinguishes THIS document from others in the same collection. "
-                    "A BAD tag would appear on every document from the same source. "
-                    "AVOID as tags: person names (ministers, signatories, officials) unless the document "
-                    "is specifically ABOUT that person; generic phrases (community engagement, public "
-                    "participation, youth involvement, capacity building); and single vague words "
-                    "(update, support, development, progress). "
-                    "PREFER: program/scheme names, specific organization names, legislation with year, "
-                    "concrete topics unique to this document. "
-                    "You may condense long names (e.g. 'pradhan mantri anusuchit jaati abhyuday yojana' → 'pm ajay yojana')."
+                    + "\n\nThese entities tell you what the document CONTAINS. "
+                    "Your job is to identify what the document is ABOUT — its purpose and subject matter. "
+                    "Do NOT copy entity lists into tags. "
+                    "Condense long names (e.g. 'pradhan mantri anusuchit jaati abhyuday yojana' → 'pm ajay yojana')."
                     + doc_type_instruction
                 )
                 logger.info(f"🏷️ Entity context added to prompt: {len(entity_lines)} categories")
@@ -741,9 +741,11 @@ Return ONLY a valid JSON object — no prose, no markdown, no explanation:
 }}
 
 Tier rules (fill each tier; combined total = {num_tags}):
-- "names"    → Specific NAMED things: program/scheme/initiative names, acts (abbreviated, e.g. "rights act 2019"), specific organisations. ~{n_names} tags. HIGHEST priority. NO person names unless the document is about that person.
-- "subjects" → What the document is SPECIFICALLY about: concrete topics, sectors, beneficiary groups unique to this document. ~{n_subjects} tags. NO generic phrases like "community engagement" or "public participation".
-- "actions"  → What the document IS and DOES: document type (e.g. "question paper", "sanction order", "newsletter") plus specific purpose. ~{n_action} tags. Always include the document type.
+- "names"    → Scheme/program names, acts with year, specific organizations. ~{n_names} tags.
+- "subjects" → What the document is ABOUT — its purpose, decision, or subject matter. NOT what it contains or lists. ~{n_subjects} tags.
+- "actions"  → Document type + specific purpose. ~{n_action} tags.
+
+A GOOD tag answers "what is this document about?" A BAD tag answers "what does this document mention?"
 
 Tag format rules:
 - 1–5 words, all lowercase, space-separated (no hyphens, no underscores).
