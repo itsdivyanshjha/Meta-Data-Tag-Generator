@@ -9,7 +9,7 @@ async def health_check():
     """Health check endpoint"""
     return HealthCheckResponse(
         status="healthy",
-        version="1.0.0",
+        version="2.0.0",
         message="Document Meta-Tagging API is running"
     )
 
