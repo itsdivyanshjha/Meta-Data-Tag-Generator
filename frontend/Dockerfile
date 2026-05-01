@@ -1,7 +1,7 @@
 # Multi-stage build for Next.js frontend
 
 # Stage 1: Dependencies
-FROM node:18-alpine AS deps
+FROM node:18-slim AS deps
 WORKDIR /app
 
 # Copy package files
@@ -11,7 +11,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 # Stage 2: Builder
-FROM node:18-alpine AS builder
+FROM node:18-slim AS builder
 WORKDIR /app
 
 # Copy dependencies from deps stage
@@ -27,15 +27,15 @@ ENV NEXT_TELEMETRY_DISABLED 1
 RUN npm run build
 
 # Stage 3: Runner
-FROM node:18-alpine AS runner
+FROM node:18-slim AS runner
 WORKDIR /app
 
 ENV NODE_ENV production
 ENV NEXT_TELEMETRY_DISABLED 1
 
-# Create non-root user
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
+# Create non-root user (Debian syntax, not Alpine)
+RUN groupadd --system --gid 1001 nodejs
+RUN useradd --system --uid 1001 nextjs
 
 # Copy necessary files from builder
 COPY --from=builder /app/.next/standalone ./
@@ -58,4 +58,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 # Start the application
 CMD ["node", "server.js"]
-
